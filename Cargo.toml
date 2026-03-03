@@ -1,0 +1,27 @@
+[package]
+name = "shiguredo_libvpx"
+version = "2026.0.0"
+edition = "2024"
+rust-version = "1.88"
+authors = ["Shiguredo Inc."]
+license = "Apache-2.0"
+description = "Rust bindings for libvpx"
+homepage = "https://github.com/shiguredo/hisui"
+repository = "https://github.com/shiguredo/hisui"
+readme = "README.md"
+build = "build.rs"
+include = ["/src/**/*", "/build.rs", "/README.md", "/LICENSE"]
+
+[features]
+source-build = []
+
+[dependencies]
+
+[build-dependencies]
+bindgen = "0.72.0"
+shiguredo_toml = "2026.1.0"
+
+# 以降は外部ライブラリビルド用のメタデータ
+# (この内容は build.rs の中からのみ参照される)
+[package.metadata.external-dependencies]
+libvpx = { git = "https://github.com/webmproject/libvpx.git", version = "v1.16.0" }
