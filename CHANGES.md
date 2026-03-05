@@ -13,9 +13,6 @@
 
 - [UPDATE] libvpx v1.16.0 に更新する
   - @voluntas
-- [ADD] Windows (MSVC x86_64) ビルド対応を追加する
-  - prebuilt ダウンロードと source-build の両方をサポートする
-  - @voluntas
 - [CHANGE] エンコーダーのピクセルフォーマット対応を追加する
   - `ImageFormat` enum を追加する (I420, Yv12, Nv12, I422, I444, I440, I42016, I42216, I44416, I44016)
   - `ImageData` enum を追加する
