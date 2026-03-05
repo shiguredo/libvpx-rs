@@ -17,9 +17,7 @@ Please read <https://github.com/shiguredo/oss> before use.
 
 ## shiguredo_libvpx について
 
-[libvpx](https://github.com/webmproject/libvpx) を利用した [Hisui](https://github.com/shiguredo/hisui) 向けの VP8 / VP9 エンコーダーおよびデコーダーの Rust バインディングです。
-
-ビルド時に [bindgen](https://github.com/rust-lang/rust-bindgen) で C ヘッダーからバインディングを自動生成し、libvpx をスタティックリンクします。
+[libvpx](https://github.com/webmproject/libvpx) を利用した VP8 / VP9 エンコーダーおよびデコーダーの Rust バインディングです。
 
 ## 特徴
 
