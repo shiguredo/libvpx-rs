@@ -48,6 +48,43 @@ jobs:
       - run: cargo clippy --features source-build -- -D warnings
       - run: cargo test --features source-build
 
+  ci-windows:
+    name: windows-2025
+    runs-on: windows-2025
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+      - run: rustup update stable
+      - name: Setup MSYS2
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          path-type: inherit
+          update: true
+          install: >-
+            git
+            make
+            nasm
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-binutils
+            mingw-w64-x86_64-clang
+      - run: rustup target add x86_64-pc-windows-gnu
+      - run: cargo fmt --all --check
+      # msys2/setup-msys2 が提供するカスタムシェル
+      # {0} は GitHub Actions が run: の内容を書き出した一時スクリプトのパスに置換される
+      - shell: msys2 {0}
+        env:
+          LIBCLANG_PATH: /mingw64/bin
+        run: cargo check --target x86_64-pc-windows-gnu --features source-build
+      - shell: msys2 {0}
+        env:
+          LIBCLANG_PATH: /mingw64/bin
+        run: cargo clippy --target x86_64-pc-windows-gnu --features source-build -- -D warnings
+      - shell: msys2 {0}
+        env:
+          LIBCLANG_PATH: /mingw64/bin
+        run: cargo test --target x86_64-pc-windows-gnu --features source-build
+
   # docs.rs 向けビルド確認
   docs-rs:
     name: docs.rs
@@ -63,6 +100,7 @@ jobs:
   slack_notify:
     needs:
       - ci
+      - ci-windows
       - docs-rs
     runs-on: ubuntu-slim
     timeout-minutes: 5

@@ -37,9 +37,46 @@ jobs:
       - run: cargo clippy --features source-build -- -D warnings
       - run: cargo test --features source-build
 
+  ci-windows:
+    name: CI (windows-2025)
+    runs-on: windows-2025
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+      - run: rustup update stable
+      - name: Setup MSYS2
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          path-type: inherit
+          update: true
+          install: >-
+            git
+            make
+            nasm
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-binutils
+            mingw-w64-x86_64-clang
+      - run: rustup target add x86_64-pc-windows-gnu
+      - run: cargo fmt --all --check
+      # msys2/setup-msys2 が提供するカスタムシェル
+      # {0} は GitHub Actions が run: の内容を書き出した一時スクリプトのパスに置換される
+      - shell: msys2 {0}
+        env:
+          LIBCLANG_PATH: /mingw64/bin
+        run: cargo check --target x86_64-pc-windows-gnu --features source-build
+      - shell: msys2 {0}
+        env:
+          LIBCLANG_PATH: /mingw64/bin
+        run: cargo clippy --target x86_64-pc-windows-gnu --features source-build -- -D warnings
+      - shell: msys2 {0}
+        env:
+          LIBCLANG_PATH: /mingw64/bin
+        run: cargo test --target x86_64-pc-windows-gnu --features source-build
+
   github-release:
     name: "Create GitHub Release"
-    needs: ci
+    needs: [ci, ci-windows]
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.get_version.outputs.VERSION }}
@@ -133,8 +170,67 @@ jobs:
             libvpx-${{ matrix.target }}.tar.gz.sha256 \
             --clobber
 
+  build-prebuilt-windows:
+    name: "Build prebuilt (windows_x86_64)"
+    needs: github-release
+    permissions:
+      contents: write
+    runs-on: windows-2025
+    timeout-minutes: 45
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@v6
+
+      - run: rustup update stable
+
+      - name: Setup MSYS2
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          path-type: inherit
+          update: true
+          install: >-
+            git
+            make
+            nasm
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-binutils
+            mingw-w64-x86_64-clang
+
+      - run: rustup target add x86_64-pc-windows-gnu
+
+      # msys2/setup-msys2 が提供するカスタムシェル
+      # {0} は GitHub Actions が run: の内容を書き出した一時スクリプトのパスに置換される
+      - name: Build with source-build
+        shell: msys2 {0}
+        env:
+          LIBCLANG_PATH: /mingw64/bin
+        run: cargo build --release --target x86_64-pc-windows-gnu --features source-build
+
+      - name: Find OUT_DIR and create prebuilt archive
+        shell: msys2 {0}
+        run: |
+          OUT_DIR=$(find target/x86_64-pc-windows-gnu/release/build/shiguredo_libvpx-*/out -maxdepth 0 -type d 2>/dev/null | head -1)
+          mkdir -p staging/lib
+          cp "${OUT_DIR}/build/libvpx/lib/libvpx.a" staging/lib/
+          cp "${OUT_DIR}/bindings.rs" staging/
+          tar czf libvpx-windows_x86_64.tar.gz -C staging .
+
+      - name: Generate SHA256 checksum
+        shell: msys2 {0}
+        run: sha256sum libvpx-windows_x86_64.tar.gz > libvpx-windows_x86_64.tar.gz.sha256
+
+      - name: Upload prebuilt archive
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload ${{ needs.github-release.outputs.version }} `
+            libvpx-windows_x86_64.tar.gz `
+            libvpx-windows_x86_64.tar.gz.sha256 `
+            --clobber
+
   publish:
-    needs: [github-release, build-prebuilt]
+    needs: [github-release, build-prebuilt, build-prebuilt-windows]
     runs-on: ubuntu-24.04
     environment: release
     permissions:
@@ -148,7 +244,7 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
 
   slack_notify:
-    needs: [ci, github-release, build-prebuilt, publish]
+    needs: [ci, ci-windows, github-release, build-prebuilt, build-prebuilt-windows, publish]
     timeout-minutes: 20
     runs-on: ubuntu-slim
     if: ${{ always() }}

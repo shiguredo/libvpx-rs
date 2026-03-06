@@ -171,6 +171,14 @@ fn compute_sha256(path: &Path) -> String {
             .arg(path)
             .output()
             .expect("failed to execute shasum. Ensure shasum is installed")
+    } else if cfg!(target_os = "windows") {
+        // Windows: certutil を使用
+        Command::new("certutil")
+            .args(["-hashfile"])
+            .arg(path)
+            .arg("SHA256")
+            .output()
+            .expect("failed to execute certutil")
     } else {
         // Linux: sha256sum を使用
         Command::new("sha256sum")
@@ -184,12 +192,25 @@ fn compute_sha256(path: &Path) -> String {
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    // shasum / sha256sum 出力形式: <hash>  <filename>
-    stdout
-        .split_whitespace()
-        .next()
-        .expect("unexpected shasum/sha256sum output format")
-        .to_lowercase()
+    if cfg!(target_os = "windows") {
+        // certutil 出力形式:
+        // SHA256 hash of <file>:
+        // <hash>
+        // CertUtil: -hashfile command completed successfully.
+        stdout
+            .lines()
+            .nth(1)
+            .expect("unexpected certutil output format")
+            .trim()
+            .to_lowercase()
+    } else {
+        // shasum / sha256sum 出力形式: <hash>  <filename>
+        stdout
+            .split_whitespace()
+            .next()
+            .expect("unexpected shasum/sha256sum output format")
+            .to_lowercase()
+    }
 }
 
 // ソースからビルドする
@@ -205,7 +226,7 @@ fn build_from_source(out_dir: &Path, output_bindings_path: &Path) -> PathBuf {
     git_clone_external_lib(&out_build_dir);
 
     // ソースからビルドする
-    build_from_source_unix(&src_dir);
+    build_from_source_platform(&src_dir);
 
     // バインディングを生成する
     bindgen::Builder::default()
@@ -220,6 +241,16 @@ fn build_from_source(out_dir: &Path, output_bindings_path: &Path) -> PathBuf {
         .expect("failed to write bindings");
 
     output_lib_dir
+}
+
+// プラットフォームに応じてソースビルドの処理を分岐する
+fn build_from_source_platform(src_dir: &Path) {
+    let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    if target_os == "windows" {
+        build_from_source_windows(src_dir);
+    } else {
+        build_from_source_unix(src_dir);
+    }
 }
 
 // Unix 環境でのソースビルド
@@ -253,6 +284,40 @@ fn build_from_source_unix(src_dir: &Path) {
     }
 }
 
+// Windows + MSYS2 環境でのソースビルド
+fn build_from_source_windows(src_dir: &Path) {
+    let target_arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
+    let configure_target = match target_arch.as_str() {
+        "x86_64" => "x86_64-win64-gcc",
+        _ => panic!("unsupported Windows arch for source-build: {}", target_arch),
+    };
+
+    // `configure` はシェルスクリプトなので sh 経由で実行する
+    run_with_shell(
+        src_dir,
+        &format!(
+            "./configure --target={configure_target} \
+             --disable-shared --enable-vp9-highbitdepth --prefix=\"$(pwd)\""
+        ),
+        "configure",
+    );
+    run_with_shell(src_dir, "make", "make");
+    run_with_shell(src_dir, "make install", "make install");
+}
+
+// shell 経由でコマンドを実行する
+fn run_with_shell(src_dir: &Path, command: &str, step_name: &str) {
+    let success = Command::new("sh")
+        .arg("-c")
+        .arg(command)
+        .current_dir(src_dir)
+        .status()
+        .is_ok_and(|status| status.success());
+    if !success {
+        panic!("[{}] failed to build {LIB_NAME} on Windows", step_name);
+    }
+}
+
 // CARGO_CFG_TARGET_OS + CARGO_CFG_TARGET_ARCH からプラットフォーム名を生成する
 fn get_target_platform() -> String {
     if let Ok(target) = env::var("LIBVPX_TARGET") {
@@ -266,6 +331,7 @@ fn get_target_platform() -> String {
         ("linux", "x86_64") => format!("{}_x86_64", detect_linux_distro()),
         ("linux", "aarch64") => format!("{}_armv8", detect_linux_distro()),
         ("macos", "aarch64") => "macos_arm64".to_string(),
+        ("windows", "x86_64") => "windows_x86_64".to_string(),
         _ => panic!("unsupported target: os={}, arch={}", target_os, target_arch),
     }
 }

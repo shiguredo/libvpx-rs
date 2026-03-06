@@ -39,12 +39,26 @@ Please read <https://github.com/shiguredo/oss> before use.
 - Ubuntu 22.04 arm64
 - macOS 26 arm64
 - macOS 15 arm64
+- Windows Server 2025 x86_64
+- Windows 11 x86_64
 
 ### ソースビルド時の追加要件
 
 - Git
 - C コンパイラ (`build-essential` 等)
 - YASM または NASM (libvpx のアセンブリ最適化に必要)
+- Windows の場合は MSYS2 + MINGW64 (`gcc` / `make` / `nasm` / `clang`) が必要
+
+```bash
+# Ubuntu
+sudo apt-get install -y build-essential nasm
+
+# macOS
+brew install nasm
+
+# Windows (MSYS2 MINGW64)
+pacman -S git make nasm mingw-w64-x86_64-gcc mingw-w64-x86_64-binutils mingw-w64-x86_64-clang
+```
 
 ## ビルド
 
