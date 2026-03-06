@@ -13,6 +13,10 @@
 
 - [UPDATE] libvpx v1.16.0 に更新する
   - @voluntas
+- [ADD] Windows (MSYS2/MinGW) 向けのビルド・CI 対応を追加する
+  - Windows 向け prebuilt バイナリを提供する
+  - `build.rs` で Windows の prebuilt ダウンロード・SHA256 検証 (`certutil`) に対応する
+  - @voluntas
 - [CHANGE] エンコーダーのピクセルフォーマット対応を追加する
   - `ImageFormat` enum を追加する (I420, Yv12, Nv12, I422, I444, I440, I42016, I42216, I44416, I44016)
   - `ImageData` enum を追加する
