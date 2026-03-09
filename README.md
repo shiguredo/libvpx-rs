@@ -2,8 +2,9 @@
 
 [![crates.io](https://img.shields.io/crates/v/shiguredo_libvpx.svg)](https://crates.io/crates/shiguredo_libvpx)
 [![docs.rs](https://docs.rs/shiguredo_libvpx/badge.svg)](https://docs.rs/shiguredo_libvpx)
-[![CI](https://github.com/shiguredo/libvpx-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/shiguredo/libvpx-rs/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
+[![GitHub Actions](https://github.com/shiguredo/libvpx-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/shiguredo/libvpx-rs/actions/workflows/ci.yml)
+[![Discord](https://img.shields.io/badge/Discord-%235865F2.svg?logo=discord&logoColor=white)](https://discord.gg/shiguredo)
 
 ## About Shiguredo's open source software
 
