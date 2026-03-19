@@ -35,7 +35,7 @@
 
 ## issues について
 
-- 番号が大きい issues から順番に対応すること
+- 番号が小さい issues から順番に対応すること
 - `{seqnum}-{category}-{short-description}.md` という命名規則を守ること
   - seqnum は `issues/SEQUENCE` ファイルの値を使うこと（9999 を超えたら 5 桁にする）
   - issue を新規作成したら `issues/SEQUENCE` の値を +1 して更新すること
@@ -43,10 +43,16 @@
   - 例: `0002-fmt-enhance-support-for-joins.md`
 - 仕様的に対応が難しい場合は issues/pending/ へ移動すること
 - 1 issue 完了ごとに 1 コミットすること
+- Issue の作成日はファイルの最初の行に `Created: YYYY-MM-DD` として記載すること
+- Issue の完了日はファイルの最初の行に `Completed: YYYY-MM-DD` として記載すること
+- Issue を作成した LLM の Model と Version をファイルのタイトルの後に `Model: <model-name> <version>` として記載すること
+  - Opus 4.6 や GPT-5.4 など
+- Issue はなぜこの対応が必要なのかの根拠を明確にすること
 
 ### issue が実は解決してなかった場合
 
 - reopen の理由を issue に書いて issues/closed から issues/ に移動すること (git mv を使うこと)
+- reopen の理由は、何がどう解決していなかったのかを明確にすること
 
 ### バグが見つかった場合
 
@@ -65,17 +71,28 @@
 - 外部依存の追加や設計判断が必要で保留中の issue は `issues/pending/` に置くこと
 - issues/pending に移動するときは issue ファイルに pending にした理由を明記すること
 - pending の issue は修正せずそのまま残す（close しない）
-- **独自文法（SQL コメントや関数呼び出し形式の新しい構文）の追加が必要な issue は `issues/pending/` に移動すること**
-  - 独自文法は設計判断であり、実装前にユーザーの承認が必要
 
 ## テストについて
 
 - pbt 以下に unittest を書かないこと
 - unittest は pbt で実現できないものだけを書くこと
 
-## pre-commit
+## 変更履歴について
 
-- cargo fmt / cargo clippy / cargo check / cargo test を実行すること
+- 変更履歴は `CHANGES.md` に記載すること
+- 変更の種別は以下の 4 つを使うこと
+  - `[UPDATE]`: 後方互換がある変更
+  - `[ADD]`: 後方互換がある追加
+  - `[CHANGE]`: 後方互換のない変更
+  - `[FIX]`: バグ修正
+- エントリは種別の順番を守って記載すること（UPDATE → ADD → CHANGE → FIX の順）
+- 機能に直接影響しない変更（ドキュメント追加、リファクタリング等）は `### misc` サブセクションに記載すること
+- 未リリースの変更は `## develop` セクションに追記すること
+- 各エントリは `- [種別] 変更内容を〜するという形で書く` というフォーマットにすること
+- 各エントリの担当者はエントリの次の行に記載し、変更内容より 2 文字分インデントを下げて `- @ユーザー名` の形式にすること
+- 担当者の行はそのエントリの最後に書くこと
+- 変更内容の説明は日本語で書くこと
+- リリース時は `## develop` を `## バージョン` に変更し、`**リリース日**: YYYY-MM-DD` を記載すること
 
 ## Rust
 
