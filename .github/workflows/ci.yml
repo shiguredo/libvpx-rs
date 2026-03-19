@@ -19,8 +19,24 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
-  ci:
+  fmt-clippy:
+    name: fmt-clippy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - run: rustup update stable
+      - run: sudo apt-get update && sudo apt-get install -y build-essential nasm
+      - uses: shiguredo/github-actions/.github/actions/rust-cache@main
+        with:
+          os: ubuntu-24.04
+          toolchain: stable
+      - run: cargo fmt --all --check
+      - run: cargo clippy --features source-build -- -D warnings
+
+  test:
     name: ${{ matrix.os }}
+    needs: fmt-clippy
     strategy:
       matrix:
         include:
@@ -42,13 +58,11 @@ jobs:
         with:
           os: ${{ matrix.os }}
           toolchain: stable
-      - run: cargo fmt --all --check
-      - run: cargo check --features source-build
-      - run: cargo clippy --features source-build -- -D warnings
       - run: cargo test --features source-build
 
-  ci-windows:
+  test-windows:
     name: windows-2025
+    needs: fmt-clippy
     runs-on: windows-2025
     timeout-minutes: 45
     steps:
@@ -68,17 +82,8 @@ jobs:
             mingw-w64-x86_64-binutils
             mingw-w64-x86_64-clang
       - run: rustup target add x86_64-pc-windows-gnu
-      - run: cargo fmt --all --check
       # msys2/setup-msys2 が提供するカスタムシェル
       # {0} は GitHub Actions が run: の内容を書き出した一時スクリプトのパスに置換される
-      - shell: msys2 {0}
-        env:
-          LIBCLANG_PATH: /mingw64/bin
-        run: cargo check --target x86_64-pc-windows-gnu --features source-build
-      - shell: msys2 {0}
-        env:
-          LIBCLANG_PATH: /mingw64/bin
-        run: cargo clippy --target x86_64-pc-windows-gnu --features source-build -- -D warnings
       - shell: msys2 {0}
         env:
           LIBCLANG_PATH: /mingw64/bin
@@ -98,8 +103,9 @@ jobs:
 
   slack_notify:
     needs:
-      - ci
-      - ci-windows
+      - fmt-clippy
+      - test
+      - test-windows
       - docs-rs
     runs-on: ubuntu-slim
     timeout-minutes: 5
