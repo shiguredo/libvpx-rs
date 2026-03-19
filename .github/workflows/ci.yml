@@ -10,9 +10,6 @@ on:
       - "**"
     paths-ignore:
       - "**.md"
-  schedule:
-    # JST 10:00 (UTC 01:00), 月-金
-    - cron: "0 1 * * 1-5"
 
 concurrency:
   group: ci-${{ github.ref }}
