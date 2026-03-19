@@ -43,8 +43,8 @@
   - 例: `0002-fmt-enhance-support-for-joins.md`
 - 仕様的に対応が難しい場合は issues/pending/ へ移動すること
 - 1 issue 完了ごとに 1 コミットすること
-- Issue の作成日はファイルの最初の行に `Created: YYYY-MM-DD` として記載すること
-- Issue の完了日はファイルの最初の行に `Completed: YYYY-MM-DD` として記載すること
+- Issue の作成日はファイルのタイトルの後に `Created: YYYY-MM-DD` として記載すること
+- Issue の完了日はファイルのタイトルの後に `Completed: YYYY-MM-DD` として記載すること
 - Issue を作成した LLM の Model と Version をファイルのタイトルの後に `Model: <model-name> <version>` として記載すること
   - Opus 4.6 や GPT-5.4 など
 - Issue はなぜこの対応が必要なのかの根拠を明確にすること
