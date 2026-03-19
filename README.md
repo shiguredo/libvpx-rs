@@ -29,6 +29,7 @@ Please read <https://github.com/shiguredo/oss> before use.
 - エンコーダーの詳細設定 (レート制御、品質、速度)
 - VP9 固有設定 (適応的量子化、タイル分割、行マルチスレッド)
 - VP8 固有設定 (デノイザー、ARNR フィルタ)
+- シンボル書き換えによる他ライブラリとの衝突回避 (`shiguredo_vpx_` プレフィックス付与)
 - prebuilt バイナリによる高速ビルド (デフォルト)
 - ソースからのビルドも可能 (`--features source-build`)
 
