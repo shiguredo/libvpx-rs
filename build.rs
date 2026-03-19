@@ -692,13 +692,13 @@ fn inject_link_name_into_bindings(bindings_path: &Path, bindgen_map: &HashMap<St
 
     for line in content.lines() {
         // `    pub fn vpx_codec_encode(` のようなパターンを検出する
-        if let Some(fn_name) = extract_extern_fn_name(line) {
-            if let Some(new_symbol) = bindgen_map.get(fn_name) {
-                // #[link_name] 属性を挿入する
-                // インデントは元の行に合わせる
-                let indent: String = line.chars().take_while(|c| c.is_whitespace()).collect();
-                output.push(format!("{indent}#[link_name = \"\\u{{1}}{new_symbol}\"]"));
-            }
+        if let Some(fn_name) = extract_extern_fn_name(line)
+            && let Some(new_symbol) = bindgen_map.get(fn_name)
+        {
+            // #[link_name] 属性を挿入する
+            // インデントは元の行に合わせる
+            let indent: String = line.chars().take_while(|c| c.is_whitespace()).collect();
+            output.push(format!("{indent}#[link_name = \"\\u{{1}}{new_symbol}\"]"));
         }
         output.push(line.to_string());
     }
