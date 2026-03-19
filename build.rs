@@ -514,16 +514,22 @@ fn exe_name(name: &str) -> String {
 /// rustup の sysroot から llvm-nm / llvm-objcopy を探す
 ///
 /// llvm-tools コンポーネントのバイナリは以下のパスに配置される:
-///   <sysroot>/lib/rustlib/<target>/bin/llvm-nm
-///   <sysroot>/lib/rustlib/<target>/bin/llvm-objcopy
+///   <sysroot>/lib/rustlib/<host>/bin/llvm-nm
+///   <sysroot>/lib/rustlib/<host>/bin/llvm-objcopy
 ///
 /// rust-toolchain.toml に llvm-tools コンポーネントの記載が必要。
+///
+/// llvm-nm / llvm-objcopy はホスト上で実行するツールなので、クロスコンパイル時は
+/// TARGET ではなく HOST のパスから探す必要がある。
+/// 例: Windows CI でホストが x86_64-pc-windows-msvc、ターゲットが x86_64-pc-windows-gnu の場合、
+/// llvm-tools は msvc 側にのみインストールされている。
 fn discover_llvm_tools() -> LlvmTools {
     let sysroot = get_rustc_sysroot();
-    // ビルドスクリプトでは env!("TARGET") はコンパイル時に解決できないため、
-    // Cargo が設定する環境変数 TARGET を実行時に取得する
-    let target = env::var("TARGET").expect("TARGET environment variable not set");
-    let tools_dir = sysroot.join("lib/rustlib").join(target).join("bin");
+    // llvm-tools はホスト上で動作するため HOST を使う。
+    // クロスコンパイル時に TARGET を使うと、ホスト側にインストールされた
+    // llvm-tools が見つからない。
+    let host = env::var("HOST").expect("HOST environment variable not set");
+    let tools_dir = sysroot.join("lib/rustlib").join(host).join("bin");
 
     let nm = tools_dir.join(exe_name("llvm-nm"));
     let objcopy = tools_dir.join(exe_name("llvm-objcopy"));
