@@ -32,7 +32,7 @@ fn main() {
     let output_bindings_path = out_dir.join("bindings.rs");
 
     // 各種メタデータを書き込む
-    let (git_url, version) = get_git_url_and_version();
+    let (url, version) = get_url_and_version();
     fs::write(
         output_metadata_path,
         format!(
@@ -40,7 +40,7 @@ fn main() {
                 "pub const BUILD_METADATA_REPOSITORY: &str={:?};\n",
                 "pub const BUILD_METADATA_VERSION: &str={:?};\n",
             ),
-            git_url, version
+            url, version
         ),
     )
     .expect("failed to write metadata file");
@@ -718,14 +718,14 @@ fn detect_linux_distro() -> String {
 
 // 外部ライブラリのリポジトリを git clone する
 fn git_clone_external_lib(build_dir: &Path) {
-    let (git_url, version) = get_git_url_and_version();
+    let (url, version) = get_url_and_version();
     let success = Command::new("git")
         .arg("clone")
         .arg("--depth")
         .arg("1")
         .arg("--branch")
         .arg(version)
-        .arg(git_url)
+        .arg(url)
         .current_dir(build_dir)
         .status()
         .is_ok_and(|status| status.success());
@@ -734,24 +734,24 @@ fn git_clone_external_lib(build_dir: &Path) {
     }
 }
 
-// Cargo.toml から依存ライブラリの Git URL とバージョンタグを取得する
-fn get_git_url_and_version() -> (String, String) {
+// Cargo.toml から依存ライブラリの URL とバージョンタグを取得する
+fn get_url_and_version() -> (String, String) {
     let cargo_toml = shiguredo_toml::Value::Table(
         shiguredo_toml::from_str(include_str!("Cargo.toml")).expect("failed to parse Cargo.toml"),
     );
-    if let Some((Some(git_url), Some(version))) = cargo_toml
+    if let Some((Some(url), Some(version))) = cargo_toml
         .get("package")
         .and_then(|v| v.get("metadata"))
         .and_then(|v| v.get("external-dependencies"))
         .and_then(|v| v.get(LIB_NAME))
         .map(|v| {
             (
-                v.get("git").and_then(|s| s.as_str()),
+                v.get("url").and_then(|s| s.as_str()),
                 v.get("version").and_then(|s| s.as_str()),
             )
         })
     {
-        (git_url.to_string(), version.to_string())
+        (url.to_string(), version.to_string())
     } else {
         panic!(
             "Cargo.toml does not contain a valid [package.metadata.external-dependencies.{LIB_NAME}] table"
