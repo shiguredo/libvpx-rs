@@ -11,6 +11,9 @@
 
 ## develop
 
+- [ADD] `supported_codecs()` API を追加する
+  - VP8/VP9 のデコード・エンコード対応状況と VP9 エンコードプロファイル情報を返す
+  - @voluntas
 - [ADD] シンボル書き換え機能を追加する
   - 静的ライブラリ内の全シンボルに `shiguredo_vpx_` プレフィックスを付与し、他ライブラリとの衝突を回避する
   - source-build / prebuilt 両パスに対応する
