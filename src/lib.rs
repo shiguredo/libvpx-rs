@@ -10,7 +10,10 @@ use std::{
     num::NonZeroUsize,
 };
 
+mod codec_info;
 mod sys;
+
+pub use codec_info::*;
 
 /// ビルド時に参照したリポジトリ URL
 pub const BUILD_REPOSITORY: &str = sys::BUILD_METADATA_REPOSITORY;

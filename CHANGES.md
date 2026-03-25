@@ -11,6 +11,8 @@
 
 ## develop
 
+- [ADD] `supported_codecs()` API を追加する
+  - @voluntas
 - [ADD] シンボル書き換え機能を追加する
   - 静的ライブラリ内の全シンボルに `shiguredo_vpx_` プレフィックスを付与し、他ライブラリとの衝突を回避する
   - source-build / prebuilt 両パスに対応する
