@@ -52,8 +52,8 @@ pub struct EncodingInfo {
 pub enum EncodingProfiles {
     /// VP9 プロファイル一覧
     Vp9(Vec<Vp9EncodingProfile>),
-    /// プロファイル情報なし
-    None,
+    /// プロファイル情報なし（プロファイルの概念がないコーデック向け）
+    Unsupported,
 }
 
 /// VP9 エンコードプロファイル
@@ -74,7 +74,7 @@ pub fn supported_codecs() -> Vec<CodecInfo> {
         .iter()
         .map(|&codec| CodecInfo {
             codec,
-            decoding: decoding_info(),
+            decoding: decoding_info(codec),
             encoding: encoding_info(codec),
         })
         .collect()
@@ -84,7 +84,7 @@ pub fn supported_codecs() -> Vec<CodecInfo> {
 ///
 /// libvpx はソフトウェアデコーダーであるため、supported は常に true、
 /// hardware_accelerated は常に false になる。
-fn decoding_info() -> DecodingInfo {
+fn decoding_info(_codec: VideoCodecType) -> DecodingInfo {
     DecodingInfo {
         supported: true,
         hardware_accelerated: false,
@@ -97,7 +97,7 @@ fn decoding_info() -> DecodingInfo {
 /// hardware_accelerated は常に false になる。
 fn encoding_info(codec: VideoCodecType) -> EncodingInfo {
     let profiles = match codec {
-        VideoCodecType::Vp8 => EncodingProfiles::None,
+        VideoCodecType::Vp8 => EncodingProfiles::Unsupported,
         VideoCodecType::Vp9 => EncodingProfiles::Vp9(vec![
             Vp9EncodingProfile::Profile0,
             Vp9EncodingProfile::Profile2,
@@ -137,7 +137,7 @@ mod tests {
                 encoding: EncodingInfo {
                     supported: true,
                     hardware_accelerated: false,
-                    profiles: EncodingProfiles::None,
+                    profiles: EncodingProfiles::Unsupported,
                 },
             }
         );
