@@ -49,13 +49,13 @@ jobs:
           - target: ubuntu-24.04_x86_64
             os: ubuntu-24.04
             rust_target: x86_64-unknown-linux-gnu
-          - target: ubuntu-24.04_aarch64
+          - target: ubuntu-24.04_arm64
             os: ubuntu-24.04-arm
             rust_target: aarch64-unknown-linux-gnu
           - target: ubuntu-22.04_x86_64
             os: ubuntu-22.04
             rust_target: x86_64-unknown-linux-gnu
-          - target: ubuntu-22.04_aarch64
+          - target: ubuntu-22.04_arm64
             os: ubuntu-22.04-arm
             rust_target: aarch64-unknown-linux-gnu
           - target: macos_arm64

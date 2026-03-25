@@ -690,7 +690,7 @@ fn get_target_platform() -> String {
 
     match (target_os.as_str(), target_arch.as_str()) {
         ("linux", "x86_64") => format!("{}_x86_64", detect_linux_distro()),
-        ("linux", "aarch64") => format!("{}_armv8", detect_linux_distro()),
+        ("linux", "aarch64") => format!("{}_arm64", detect_linux_distro()),
         ("macos", "aarch64") => "macos_arm64".to_string(),
         ("windows", "x86_64") => "windows_x86_64".to_string(),
         _ => panic!("unsupported target: os={}, arch={}", target_os, target_arch),
