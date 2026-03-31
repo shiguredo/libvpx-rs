@@ -11,6 +11,12 @@
 
 ## develop
 
+- [CHANGE] `Decoder::next_frame()` の戻り値を `Option<DecodedFrame>` から `Result<Option<DecodedFrame>, Error>` に変更する
+  - 未対応の画像フォーマットに対して panic ではなくエラーを返すようにする
+  - @voluntas
+- [FIX] `Encoder::new()` で `vpx_img_alloc()` の失敗時に未定義動作が発生する問題を修正する
+  - 戻り値の NULL チェックを追加し、失敗時はエラーを返すようにする
+  - @voluntas
 - [ADD] `supported_codecs()` API を追加する
   - VP8/VP9 のデコード・エンコード対応状況と VP9 エンコードプロファイル情報を返す
   - @voluntas

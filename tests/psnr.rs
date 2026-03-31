@@ -191,7 +191,7 @@ fn decode_frames(codec: DecoderCodec, packets: &[Vec<u8>]) -> DecodedI420 {
 
     for packet in packets {
         decoder.decode(packet).expect("failed to decode");
-        while let Some(frame) = decoder.next_frame() {
+        while let Some(frame) = decoder.next_frame().expect("failed to get next frame") {
             assert!(result.is_none(), "expected exactly one decoded frame");
             result = Some(DecodedI420 {
                 y: frame.y_plane().to_vec(),
@@ -207,7 +207,7 @@ fn decode_frames(codec: DecoderCodec, packets: &[Vec<u8>]) -> DecodedI420 {
     }
 
     decoder.finish().expect("failed to finish decoding");
-    while let Some(frame) = decoder.next_frame() {
+    while let Some(frame) = decoder.next_frame().expect("failed to get next frame") {
         assert!(result.is_none(), "expected exactly one decoded frame");
         result = Some(DecodedI420 {
             y: frame.y_plane().to_vec(),

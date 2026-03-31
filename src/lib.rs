@@ -220,26 +220,29 @@ impl Decoder {
     ///
     /// [`Decoder::decode()`] や [`Decoder::finish()`] の後には、
     /// このメソッドを、結果が `None` になるまで呼び出し続ける必要がある
-    pub fn next_frame(&mut self) -> Option<DecodedFrame<'_>> {
+    pub fn next_frame(&mut self) -> Result<Option<DecodedFrame<'_>>, Error> {
         unsafe {
             let image = sys::vpx_codec_get_frame(&mut self.ctx, &mut self.iter);
             if image.is_null() {
                 self.iter = std::ptr::null();
-                return None;
+                return Ok(None);
             }
             let image = &*image;
 
-            // 画像フォーマットは I420 または high-depth バージョンである前提
-            assert!(
-                matches!(
-                    image.fmt,
-                    sys::vpx_img_fmt_VPX_IMG_FMT_I420 | sys::vpx_img_fmt_VPX_IMG_FMT_I42016
-                ),
-                "unexpected image format: {:?}",
-                image.fmt
-            );
+            // デコーダーは I420 または 16-bit I420 のみ対応
+            if !matches!(
+                image.fmt,
+                sys::vpx_img_fmt_VPX_IMG_FMT_I420 | sys::vpx_img_fmt_VPX_IMG_FMT_I42016
+            ) {
+                self.iter = std::ptr::null();
+                return Err(Error::with_reason(
+                    sys::vpx_codec_err_t_VPX_CODEC_UNSUP_FEATURE,
+                    "vpx_codec_get_frame",
+                    "unsupported image format",
+                ));
+            }
 
-            Some(DecodedFrame(image))
+            Ok(Some(DecodedFrame(image)))
         }
     }
 }
@@ -797,13 +800,22 @@ impl Encoder {
             };
 
             let mut img = MaybeUninit::zeroed();
-            sys::vpx_img_alloc(
+            let result = sys::vpx_img_alloc(
                 img.as_mut_ptr(),
                 img_fmt,
                 vpx_config.g_w,
                 vpx_config.g_h,
                 1, // align に 1 を指定することで width == y_stride となることが保証される
             );
+            if result.is_null() {
+                // vpx_img_alloc が失敗した場合、初期化済みの codec context を手動で解放する
+                sys::vpx_codec_destroy(ctx.as_mut_ptr());
+                return Err(Error::with_reason(
+                    sys::vpx_codec_err_t_VPX_CODEC_MEM_ERROR,
+                    "vpx_img_alloc",
+                    "image allocation failed",
+                ));
+            }
 
             let img = img.assume_init();
             let height = encoder_config.height;
@@ -1358,12 +1370,20 @@ mod tests {
         let mut decoded_count = 0;
 
         decoder.decode(&data).expect("failed to decode");
-        while decoder.next_frame().is_some() {
+        while decoder
+            .next_frame()
+            .expect("failed to get next frame")
+            .is_some()
+        {
             decoded_count += 1;
         }
 
         decoder.finish().expect("failed to finish");
-        while decoder.next_frame().is_some() {
+        while decoder
+            .next_frame()
+            .expect("failed to get next frame")
+            .is_some()
+        {
             decoded_count += 1;
         }
 
@@ -1385,12 +1405,20 @@ mod tests {
         let mut decoded_count = 0;
 
         decoder.decode(&data).expect("failed to decode");
-        while decoder.next_frame().is_some() {
+        while decoder
+            .next_frame()
+            .expect("failed to get next frame")
+            .is_some()
+        {
             decoded_count += 1;
         }
 
         decoder.finish().expect("failed to finish");
-        while decoder.next_frame().is_some() {
+        while decoder
+            .next_frame()
+            .expect("failed to get next frame")
+            .is_some()
+        {
             decoded_count += 1;
         }
 
