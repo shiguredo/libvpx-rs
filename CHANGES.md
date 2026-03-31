@@ -11,6 +11,13 @@
 
 ## develop
 
+### misc
+
+
+## 2026.1.0
+
+**リリース日**: 2026-03-31
+
 - [CHANGE] `Decoder::next_frame()` の戻り値を `Option<DecodedFrame>` から `Result<Option<DecodedFrame>, Error>` に変更する
   - 未対応の画像フォーマットに対して panic ではなくエラーを返すようにする
   - @voluntas
