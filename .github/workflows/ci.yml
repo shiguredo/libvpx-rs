@@ -1,0 +1,123 @@
+name: CI
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - "develop"
+      - "feature/**"
+    tags-ignore:
+      - "**"
+    paths-ignore:
+      - "**.md"
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  RUST_BACKTRACE: 1
+
+jobs:
+  fmt-clippy:
+    name: fmt-clippy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - run: rustup update stable
+      - run: sudo apt-get update && sudo apt-get install -y build-essential nasm
+      - uses: shiguredo/github-actions/.github/actions/rust-cache@main
+        with:
+          os: ubuntu-24.04
+          toolchain: stable
+      - run: cargo fmt --all --check
+      - run: cargo clippy --features source-build -- -D warnings
+
+  test:
+    name: ${{ matrix.os }}
+    needs: fmt-clippy
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-24.04
+          - os: ubuntu-24.04-arm
+          - os: ubuntu-22.04
+          - os: ubuntu-22.04-arm
+          - os: macos-26
+          - os: macos-15
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - run: rustup update stable
+      - name: Install build dependencies (Ubuntu)
+        if: startsWith(matrix.os, 'ubuntu')
+        run: sudo apt-get update && sudo apt-get install -y build-essential nasm
+      - uses: shiguredo/github-actions/.github/actions/rust-cache@main
+        with:
+          os: ${{ matrix.os }}
+          toolchain: stable
+      - run: cargo test --features source-build
+
+  test-windows:
+    name: windows-2025
+    needs: fmt-clippy
+    runs-on: windows-2025
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+      - run: rustup update stable
+      - name: Setup MSYS2
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          path-type: inherit
+          update: true
+          install: >-
+            git
+            make
+            nasm
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-binutils
+            mingw-w64-x86_64-clang
+      - run: rustup target add x86_64-pc-windows-gnu
+      # msys2/setup-msys2 が提供するカスタムシェル
+      # {0} は GitHub Actions が run: の内容を書き出した一時スクリプトのパスに置換される
+      - shell: msys2 {0}
+        env:
+          LIBCLANG_PATH: /mingw64/bin
+        run: cargo test --target x86_64-pc-windows-gnu --features source-build
+
+  # docs.rs 向けビルド確認
+  docs-rs:
+    name: docs.rs
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      DOCS_RS: 1
+    steps:
+      - uses: actions/checkout@v6
+      - run: rustup update stable
+      - run: cargo doc --no-deps
+
+  slack_notify:
+    needs:
+      - fmt-clippy
+      - test
+      - test-windows
+      - docs-rs
+    runs-on: ubuntu-slim
+    timeout-minutes: 5
+    permissions:
+      actions: read
+    steps:
+      - name: Slack Notification
+        uses: shiguredo/github-actions/.github/actions/slack-notify@main
+        with:
+          status: ${{ job.status }}
+          slack_webhook: ${{ secrets.SLACK_WEBHOOK }}
+          slack_channel: rust-oss
+          notify_mode: failure_and_fixed
+        env:
+          GH_TOKEN: ${{ github.token }}
