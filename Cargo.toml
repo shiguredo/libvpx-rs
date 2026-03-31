@@ -1,6 +1,6 @@
 [package]
 name = "shiguredo_libvpx"
-version = "2026.1.0-canary.4"
+version = "2026.1.0"
 edition = "2024"
 rust-version = "1.88"
 authors = ["Shiguredo Inc."]
@@ -18,11 +18,10 @@ source-build = []
 [dependencies]
 
 [build-dependencies]
-bindgen = "0.72.0"
-shiguredo_toml = "2026.1.0"
+bindgen = "0.72"
+shiguredo_toml = "2026.1"
 
 # 以降は外部ライブラリビルド用のメタデータ
 # (この内容は build.rs の中からのみ参照される)
-[package.metadata.external-dependencies.libvpx]
-version = "v1.16.0"
-url = "https://github.com/webmproject/libvpx"
+[package.metadata.external-dependencies]
+libvpx = { url = "https://github.com/webmproject/libvpx", version = "v1.16.0" }
