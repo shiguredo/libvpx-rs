@@ -14,15 +14,19 @@
 - [ADD] `Encoder::reconfigure` と `ReconfigureParams` を追加する
   - ビットレート / FPS / 量子化レンジ / キーフレーム間隔をエンコード中に変更できる
   - `target_bitrate` は 1000 bps 以上かつ 1_000_000 kbps 以下を要求する
-  - `fps_numerator` と `fps_denominator` は両方同時指定かつ非ゼロを要求する
-  - `min_quantizer <= max_quantizer` を要求する
-  - [`Encoder::next_frame`] を消費し切る前の呼び出しはエラーを返す
+  - `fps_numerator` と `fps_denominator` は両方同時指定かつ非ゼロ、いずれも `1_000_000_000` 以下を要求する
+  - `min_quantizer <= max_quantizer` かつ `max_quantizer <= 63` を要求する
+  - `Encoder::next_frame` のイテレーション途中（パケットを部分的にしか消費していない状態）での呼び出しはエラーを返す
   - 失敗時は内部設定をロールバックする
   - `ReconfigureParams` は `#[non_exhaustive]` のため将来のフィールド追加で破壊的変更にならない
   - @voluntas
-- [UPDATE] `Encoder::new` の整数値検査を厳格化する
-  - `width` / `height` / `target_bitrate` / `fps_*` / `min_quantizer` / `max_quantizer` / `keyframe_interval` などのキャストを `try_from` 化し、`usize` から `c_uint` / `c_int` への暗黙的な切り捨てを拒否する
+- [CHANGE] `Encoder::new` の整数値検査を厳格化する
+  - `width` / `height` / `target_bitrate` / `fps_*` / `min_quantizer` / `max_quantizer` / `keyframe_interval` / `lag_in_frames` / `threads` / `frame_drop_threshold` などのキャストを `try_from` 化し、`usize` から `c_uint` / `c_int` への暗黙的な切り捨てを拒否する
   - `target_bitrate` の上限・下限検査を `reconfigure` と共通化する
+    - 旧実装は `target_bitrate < 1000` を libvpx に黙って渡し、`target_bitrate > 1_000_000` kbps を libvpx 側で silent clip していた。新実装はいずれも `VPX_CODEC_INVALID_PARAM` で拒否する
+  - `min_quantizer > max_quantizer` および `max_quantizer > 63` を `Encoder::new` の時点で拒否する（旧実装は libvpx 内部での検査任せだった）
+  - これらの値で `Encoder::new` が成功していた呼び出しは新たにエラーを返すため、後方互換性は失われる
+  - エラー詳細文言が libvpx 由来からラッパー由来 (`shiguredo_libvpx::Encoder::new`) に変わる
   - @voluntas
 
 ### misc
