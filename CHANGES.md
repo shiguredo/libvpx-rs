@@ -12,7 +12,17 @@
 ## develop
 
 - [ADD] `Encoder::reconfigure` と `ReconfigureParams` を追加する
-  - `vpx_codec_enc_config_set()` を利用してビットレート / FPS / 量子化レンジ / キーフレーム間隔を動的に変更できる
+  - ビットレート / FPS / 量子化レンジ / キーフレーム間隔をエンコード中に変更できる
+  - `target_bitrate` は 1000 bps 以上かつ 1_000_000 kbps 以下を要求する
+  - `fps_numerator` と `fps_denominator` は両方同時指定かつ非ゼロを要求する
+  - `min_quantizer <= max_quantizer` を要求する
+  - [`Encoder::next_frame`] を消費し切る前の呼び出しはエラーを返す
+  - 失敗時は内部設定をロールバックする
+  - `ReconfigureParams` は `#[non_exhaustive]` のため将来のフィールド追加で破壊的変更にならない
+  - @voluntas
+- [UPDATE] `Encoder::new` の整数値検査を厳格化する
+  - `width` / `height` / `target_bitrate` / `fps_*` / `min_quantizer` / `max_quantizer` / `keyframe_interval` などのキャストを `try_from` 化し、`usize` から `c_uint` / `c_int` への暗黙的な切り捨てを拒否する
+  - `target_bitrate` の上限・下限検査を `reconfigure` と共通化する
   - @voluntas
 
 ### misc
