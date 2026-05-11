@@ -12,25 +12,19 @@
 ## develop
 
 - [ADD] `Encoder::reconfigure` と `ReconfigureParams` を追加する
-  - ビットレート / FPS / 量子化レンジ / キーフレーム間隔をエンコード中に変更できる
-  - `target_bitrate` は 1000 bps 以上かつ 1_000_000 kbps 以下を要求する
-  - `fps_numerator` と `fps_denominator` は両方同時指定かつ非ゼロ、いずれも `1_000_000_000` 以下を要求する
-  - `min_quantizer <= max_quantizer` かつ `max_quantizer <= 63` を要求する
-  - `Encoder::next_frame` のイテレーション途中（パケットを部分的にしか消費していない状態）での呼び出しはエラーを返す
+  - ビットレート・FPS・量子化レンジ・キーフレーム間隔をエンコード中に変更できる
+  - `target_bitrate` は 1000 bps 以上 1_000_000_000 bps 以下、`fps_numerator` / `fps_denominator` は両方同時指定かつ非ゼロで 1_000_000_000 以下、`min_quantizer <= max_quantizer <= 63` を要求する
+  - libvpx 内部での silent clip が起こらない範囲のみ受け付け、許容範囲外はすべて `VPX_CODEC_INVALID_PARAM` で拒否する
+  - 全フィールドが `None` の場合は libvpx を呼ばずに早期成功する
   - 失敗時は内部設定をロールバックする
-  - `ReconfigureParams` は `#[non_exhaustive]` のため将来のフィールド追加で破壊的変更にならない
   - @voluntas
-- [CHANGE] `Encoder::new` の整数値検査を厳格化する
-  - `width` / `height` / `target_bitrate` / `fps_*` / `min_quantizer` / `max_quantizer` / `keyframe_interval` / `lag_in_frames` / `threads` / `frame_drop_threshold` などのキャストを `try_from` 化し、`usize` から `c_uint` / `c_int` への暗黙的な切り捨てを拒否する
-  - `target_bitrate` の上限・下限検査を `reconfigure` と共通化する
-    - 旧実装は `target_bitrate < 1000` を libvpx に黙って渡し、`target_bitrate > 1_000_000` kbps を libvpx 側で silent clip していた。新実装はいずれも `VPX_CODEC_INVALID_PARAM` で拒否する
-  - `min_quantizer > max_quantizer` および `max_quantizer > 63` を `Encoder::new` の時点で拒否する（旧実装は libvpx 内部での検査任せだった）
+- [CHANGE] `Encoder::new` の入力検査を厳格化する
+  - `width` / `height` / `target_bitrate` / `fps_numerator` / `fps_denominator` / `min_quantizer` / `max_quantizer` / `keyframe_interval` / `lag_in_frames` / `threads` / `frame_drop_threshold` / `cq_level` を `try_from` 化し、`usize` から `c_uint` / `c_int` への切り捨てを拒否する
+  - `target_bitrate < 1000 bps` (旧実装は libvpx に素通し) と `target_bitrate > 1_000_000_000 bps` (旧実装は libvpx 側で silent clip) をいずれも `VPX_CODEC_INVALID_PARAM` で拒否する
+  - `min_quantizer > max_quantizer`、`max_quantizer > 63`、`cq_level > 63` を `Encoder::new` の時点で拒否する (旧実装は libvpx 内部任せ)
   - これらの値で `Encoder::new` が成功していた呼び出しは新たにエラーを返すため、後方互換性は失われる
   - エラー詳細文言が libvpx 由来からラッパー由来 (`shiguredo_libvpx::Encoder::new`) に変わる
   - @voluntas
-
-### misc
-
 
 ## 2026.1.0
 
