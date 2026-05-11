@@ -695,9 +695,38 @@ pub struct EncodeOptions {
     pub force_keyframe: bool,
 }
 
+/// エンコーダー再設定パラメータ
+///
+/// [`Encoder::reconfigure`] で動的に変更可能なパラメータ。
+/// `None` の項目は変更しない。
+///
+/// `fps_numerator` と `fps_denominator` は両方同時に指定するか、両方とも `None` にする必要がある。
+#[derive(Debug, Clone, Default)]
+pub struct ReconfigureParams {
+    /// エンコードビットレート (bps 単位)
+    pub target_bitrate: Option<usize>,
+
+    /// FPS の分子
+    pub fps_numerator: Option<usize>,
+
+    /// FPS の分母
+    pub fps_denominator: Option<usize>,
+
+    /// libvpx に指定する品質調整用パラメーター (最小量子化値)
+    pub min_quantizer: Option<usize>,
+
+    /// libvpx に指定する品質調整用パラメーター (最大量子化値)
+    pub max_quantizer: Option<usize>,
+
+    /// キーフレーム間隔 (フレーム数)
+    pub keyframe_interval: Option<NonZeroUsize>,
+}
+
 /// VP8 / VP9 エンコーダー
 pub struct Encoder {
     ctx: sys::vpx_codec_ctx,
+    // reconfigure 用に最新の設定を保持する
+    cfg: sys::vpx_codec_enc_cfg,
     img: sys::vpx_image,
     iter: sys::vpx_codec_iter_t,
     frame_count: usize,
@@ -876,6 +905,7 @@ impl Encoder {
 
             let mut this = Self {
                 ctx: ctx.assume_init(),
+                cfg: vpx_config,
                 img,
                 iter: std::ptr::null(),
                 frame_count: 0,
@@ -1215,6 +1245,51 @@ impl Encoder {
         };
         Error::check(code, "vpx_codec_encode", Some(&self.ctx))?;
         self.frame_count += 1;
+        Ok(())
+    }
+
+    /// エンコーダーのパラメータを動的に変更する
+    ///
+    /// `vpx_codec_enc_config_set()` を呼び出して、ビットレート・FPS・量子化レンジ・
+    /// キーフレーム間隔をエンコード中に変更する。
+    /// `None` のフィールドは変更されない。
+    pub fn reconfigure(&mut self, params: ReconfigureParams) -> Result<(), Error> {
+        // FPS は分子・分母を同時に指定する必要がある
+        match (params.fps_numerator, params.fps_denominator) {
+            (Some(_), None) | (None, Some(_)) => {
+                return Err(Error::with_reason(
+                    sys::vpx_codec_err_t_VPX_CODEC_INVALID_PARAM,
+                    "shiguredo_libvpx::Encoder::reconfigure",
+                    "fps_numerator and fps_denominator must be set together",
+                ));
+            }
+            _ => {}
+        }
+
+        if let Some(target_bitrate) = params.target_bitrate {
+            self.cfg.rc_target_bitrate = target_bitrate as c_uint / 1000;
+        }
+
+        // FPS とは分子・分母の関係が逆になる (g_timebase は 1 フレームの時間)
+        if let (Some(num), Some(den)) = (params.fps_numerator, params.fps_denominator) {
+            self.cfg.g_timebase.num = den as c_int;
+            self.cfg.g_timebase.den = num as c_int;
+        }
+
+        if let Some(min_quantizer) = params.min_quantizer {
+            self.cfg.rc_min_quantizer = min_quantizer as c_uint;
+        }
+
+        if let Some(max_quantizer) = params.max_quantizer {
+            self.cfg.rc_max_quantizer = max_quantizer as c_uint;
+        }
+
+        if let Some(kf_interval) = params.keyframe_interval {
+            self.cfg.kf_max_dist = kf_interval.get() as c_uint;
+        }
+
+        let code = unsafe { sys::vpx_codec_enc_config_set(&mut self.ctx, &self.cfg) };
+        Error::check(code, "vpx_codec_enc_config_set", Some(&self.ctx))?;
         Ok(())
     }
 
@@ -1616,6 +1691,81 @@ mod tests {
                 force_keyframe: false,
             },
         );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn reconfigure_vp9_encoder() {
+        let config = vp9_encoder_config(ImageFormat::I420);
+        let size = config.width * config.height;
+        let mut encoder = Encoder::new(config).expect("failed to create");
+
+        let y = vec![0; size];
+        let u = vec![0; size / 4];
+        let v = vec![0; size / 4];
+
+        // 1 フレーム目をエンコード
+        encoder
+            .encode(
+                &ImageData::I420 {
+                    y: &y,
+                    u: &u,
+                    v: &v,
+                },
+                &EncodeOptions {
+                    force_keyframe: false,
+                },
+            )
+            .expect("failed to encode");
+        while encoder.next_frame().is_some() {}
+
+        // ビットレートと FPS とキーフレーム間隔を変更
+        encoder
+            .reconfigure(ReconfigureParams {
+                target_bitrate: Some(500_000),
+                fps_numerator: Some(60),
+                fps_denominator: Some(1),
+                keyframe_interval: Some(NonZeroUsize::new(60).expect("non-zero")),
+                ..ReconfigureParams::default()
+            })
+            .expect("failed to reconfigure");
+
+        // 2 フレーム目を継続してエンコードできる
+        encoder
+            .encode(
+                &ImageData::I420 {
+                    y: &y,
+                    u: &u,
+                    v: &v,
+                },
+                &EncodeOptions {
+                    force_keyframe: false,
+                },
+            )
+            .expect("failed to encode after reconfigure");
+        while encoder.next_frame().is_some() {}
+
+        encoder.finish().expect("failed to finish");
+        while encoder.next_frame().is_some() {}
+    }
+
+    #[test]
+    fn reconfigure_fps_must_be_set_together() {
+        let config = vp9_encoder_config(ImageFormat::I420);
+        let mut encoder = Encoder::new(config).expect("failed to create");
+
+        // 分子のみ指定はエラー
+        let result = encoder.reconfigure(ReconfigureParams {
+            fps_numerator: Some(60),
+            ..ReconfigureParams::default()
+        });
+        assert!(result.is_err());
+
+        // 分母のみ指定もエラー
+        let result = encoder.reconfigure(ReconfigureParams {
+            fps_denominator: Some(1),
+            ..ReconfigureParams::default()
+        });
         assert!(result.is_err());
     }
 

@@ -11,6 +11,10 @@
 
 ## develop
 
+- [ADD] `Encoder::reconfigure` と `ReconfigureParams` を追加する
+  - `vpx_codec_enc_config_set()` を利用してビットレート / FPS / 量子化レンジ / キーフレーム間隔を動的に変更できる
+  - @voluntas
+
 ### misc
 
 
