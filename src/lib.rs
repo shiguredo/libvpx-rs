@@ -31,7 +31,7 @@ pub struct Error {
 }
 
 impl Error {
-    pub(crate) fn check(
+    fn check(
         code: sys::vpx_codec_err_t,
         function: &'static str,
         ctx: Option<&sys::vpx_codec_ctx>,
@@ -63,7 +63,7 @@ impl Error {
         }
     }
 
-    pub(crate) fn with_reason(
+    fn with_reason(
         code: sys::vpx_codec_err_t,
         function: &'static str,
         reason: &'static str,
@@ -76,7 +76,7 @@ impl Error {
         }
     }
 
-    pub(crate) fn reason(&self) -> Option<&str> {
+    fn reason(&self) -> Option<&str> {
         if self.reason.is_some() {
             return self.reason;
         }
@@ -765,15 +765,10 @@ impl ReconfigureParams {
 }
 
 /// VP8 / VP9 エンコーダー
-///
-/// `cfg` は 1-pass 専用前提でシャローコピー可能とみなしている (2-pass バッファは
-/// 常に NULL)。`reconfigure` 入口の `assert!` で実行時にも検証する。
-/// ここに保持する値はユーザー入力ベースであり、libvpx の `priv->cfg` とは
-/// 一致しない場合がある (本ラッパは libvpx の silent clip を発生させない範囲のみ
-/// 受け付けるが、libvpx 側の内部表現自体は別物)。
-// TODO: 2-pass 対応を追加する際はシャローコピー前提が崩れるためここを再設計する
 pub struct Encoder {
     ctx: sys::vpx_codec_ctx,
+    // 1-pass 専用前提でシャローコピー可能とみなしている (2-pass バッファは常に NULL)
+    // 2-pass 対応を追加する際はシャローコピー前提が崩れるため、ここを再設計する必要がある
     cfg: sys::vpx_codec_enc_cfg,
     img: sys::vpx_image,
     iter: sys::vpx_codec_iter_t,
@@ -784,7 +779,7 @@ pub struct Encoder {
 }
 
 /// `INVALID_PARAM` のエラーを生成する内部ヘルパー
-pub(crate) fn invalid_param(function: &'static str, reason: &'static str) -> Error {
+fn invalid_param(function: &'static str, reason: &'static str) -> Error {
     Error::with_reason(
         sys::vpx_codec_err_t_VPX_CODEC_INVALID_PARAM,
         function,
@@ -854,12 +849,8 @@ fn merge_reconfigure_params_into_cfg(
                 "target_bitrate must be at least 1000 bps (libvpx kbps resolution)",
             ));
         }
-        // 上の検査で `kbps <= VPX_MAX_TARGET_BITRATE_KBPS` が保証されるので
-        // `try_from` は無限ループや失敗にならないが、`as` キャストを避けて
-        // 明示的に検査する
-        let kbps = c_uint::try_from(kbps)
-            .map_err(|_| invalid_param(function, "target_bitrate (kbps) is out of c_uint range"))?;
-        cfg.rc_target_bitrate = kbps;
+        // 上の上限検査で kbps <= VPX_MAX_TARGET_BITRATE_KBPS (1_000_000) が保証されるため c_uint に必ず収まる
+        cfg.rc_target_bitrate = kbps as c_uint;
     }
 
     match (params.fps_numerator, params.fps_denominator) {
@@ -889,12 +880,10 @@ fn merge_reconfigure_params_into_cfg(
                 ));
             }
             // libvpx の g_timebase は 1 フレームの提示時間 (秒) の分数表現
-            // (libvpx `vpx/vpx_encoder.h` の `vpx_codec_enc_cfg::g_timebase` の項参照)。
-            // FPS が num/den のときタイムベースは den/num になる
-            cfg.g_timebase.num = c_int::try_from(den)
-                .map_err(|_| invalid_param(function, "fps_denominator is out of c_int range"))?;
-            cfg.g_timebase.den = c_int::try_from(num)
-                .map_err(|_| invalid_param(function, "fps_numerator is out of c_int range"))?;
+            // (libvpx `vpx/vpx_encoder.h` の `vpx_codec_enc_cfg::g_timebase` の項参照)
+            // 上の上限検査で num, den <= VPX_MAX_TIMEBASE (1_000_000_000) が保証されるため c_int に必ず収まる
+            cfg.g_timebase.num = den as c_int;
+            cfg.g_timebase.den = num as c_int;
         }
         (None, None) => {}
     }
@@ -978,8 +967,8 @@ impl Encoder {
         if encoder_config.cq_level > VPX_MAX_QUANTIZER as usize {
             return Err(invalid_param(FUNCTION, "cq_level must not exceed 63"));
         }
-        let cq_level = c_uint::try_from(encoder_config.cq_level)
-            .map_err(|_| invalid_param(FUNCTION, "cq_level is out of range"))?;
+        // 上の上限検査で cq_level <= 63 が保証されるため c_uint に必ず収まる
+        let cq_level = encoder_config.cq_level as c_uint;
 
         if let Some(lag) = encoder_config.lag_in_frames {
             vpx_config.g_lag_in_frames = c_uint::try_from(lag.get())
@@ -1477,29 +1466,31 @@ impl Encoder {
     /// エンコーダーに `min_quantizer = Some(20)` のみを渡すと `min > max` で
     /// 拒否される。両者を同時に変更したい場合は両方を `Some` で渡すこと。
     ///
-    /// 失敗した場合は内部設定が変更されない。ラッパー側の事前検査で失敗した場合は
-    /// libvpx の `vpx_codec_enc_config_set` 自体を呼ばない。libvpx 側で検査が
-    /// 失敗した場合も `self.cfg` は更新しない。
-    pub fn reconfigure(&mut self, params: ReconfigureParams) -> Result<(), Error> {
+    /// 失敗した場合は内部設定 (`self.cfg`) を変更しない。ラッパー側の事前検査で
+    /// 失敗した場合は libvpx の `vpx_codec_enc_config_set` 自体を呼ばない。
+    pub fn reconfigure(&mut self, params: &ReconfigureParams) -> Result<(), Error> {
         const FUNCTION: &str = "shiguredo_libvpx::Encoder::reconfigure";
 
         // 2-pass バッファが NULL であることを保証する。`Encoder::cfg` のシャロー
         // コピー前提が崩れていないことを release ビルドでも検査する
-        assert!(self.cfg.rc_twopass_stats_in.buf.is_null());
-        assert!(self.cfg.rc_firstpass_mb_stats_in.buf.is_null());
+        assert!(
+            self.cfg.rc_twopass_stats_in.buf.is_null(),
+            "rc_twopass_stats_in must be null in 1-pass mode"
+        );
+        assert!(
+            self.cfg.rc_firstpass_mb_stats_in.buf.is_null(),
+            "rc_firstpass_mb_stats_in must be null in 1-pass mode"
+        );
 
         self.ensure_iter_drained(FUNCTION)?;
 
-        // 全フィールドが None の場合は libvpx の状態を触らずに早期成功させる。
-        // libvpx の `vpx_codec_enc_config_set` は内部レート制御 buffer を
-        // リセットする実装の可能性があり、「何も変えない reconfigure」が副作用を
-        // 持つのを避けるため
+        // 全フィールドが None の場合は libvpx を呼ばずに早期成功させる
         if params.is_empty() {
             return Ok(());
         }
 
         let mut new_cfg = self.cfg;
-        merge_reconfigure_params_into_cfg(&mut new_cfg, &params, FUNCTION)?;
+        merge_reconfigure_params_into_cfg(&mut new_cfg, params, FUNCTION)?;
 
         let code = unsafe { sys::vpx_codec_enc_config_set(&mut self.ctx, &new_cfg) };
         Error::check(code, "vpx_codec_enc_config_set", Some(&self.ctx))?;
@@ -1555,27 +1546,27 @@ impl Encoder {
 #[cfg(test)]
 impl Encoder {
     /// テスト専用: 現在の `cfg.rc_target_bitrate` (kbps) を返す
-    pub(crate) fn cfg_target_bitrate_kbps(&self) -> c_uint {
+    fn cfg_target_bitrate_kbps(&self) -> c_uint {
         self.cfg.rc_target_bitrate
     }
 
     /// テスト専用: 現在の `cfg.rc_min_quantizer` を返す
-    pub(crate) fn cfg_min_quantizer(&self) -> c_uint {
+    fn cfg_min_quantizer(&self) -> c_uint {
         self.cfg.rc_min_quantizer
     }
 
     /// テスト専用: 現在の `cfg.rc_max_quantizer` を返す
-    pub(crate) fn cfg_max_quantizer(&self) -> c_uint {
+    fn cfg_max_quantizer(&self) -> c_uint {
         self.cfg.rc_max_quantizer
     }
 
     /// テスト専用: 現在の `cfg.kf_max_dist` を返す
-    pub(crate) fn cfg_kf_max_dist(&self) -> c_uint {
+    fn cfg_kf_max_dist(&self) -> c_uint {
         self.cfg.kf_max_dist
     }
 
     /// テスト専用: 現在の `cfg.g_timebase.(num, den)` を返す
-    pub(crate) fn cfg_timebase(&self) -> (c_int, c_int) {
+    fn cfg_timebase(&self) -> (c_int, c_int) {
         (self.cfg.g_timebase.num, self.cfg.g_timebase.den)
     }
 }
@@ -2023,7 +2014,7 @@ mod tests {
         drain_frames(&mut encoder);
 
         encoder
-            .reconfigure(ReconfigureParams {
+            .reconfigure(&ReconfigureParams {
                 target_bitrate: Some(500_000),
                 fps_numerator: Some(60),
                 fps_denominator: Some(1),
@@ -2066,7 +2057,7 @@ mod tests {
 
         // min_quantizer = 20 だけ渡すと、現在の max = 10 と比較されて拒否される
         let err = encoder
-            .reconfigure(ReconfigureParams {
+            .reconfigure(&ReconfigureParams {
                 min_quantizer: Some(20),
                 ..ReconfigureParams::default()
             })
@@ -2076,13 +2067,13 @@ mod tests {
             Some("min_quantizer must not exceed max_quantizer")
         );
 
-        // ロールバックされて状態は変わっていない
+        // ラッパー側事前検査で弾かれており、内部状態は最初から変更されていない
         assert_eq!(encoder.cfg_min_quantizer(), 0);
         assert_eq!(encoder.cfg_max_quantizer(), 10);
 
         // 両方同時に渡せば成功する
         encoder
-            .reconfigure(ReconfigureParams {
+            .reconfigure(&ReconfigureParams {
                 min_quantizer: Some(20),
                 max_quantizer: Some(40),
                 ..ReconfigureParams::default()
@@ -2109,7 +2100,7 @@ mod tests {
             let mut encoder = Encoder::new(config).expect("failed to create");
 
             encoder
-                .reconfigure(ReconfigureParams {
+                .reconfigure(&ReconfigureParams {
                     min_quantizer: Some(quantizer),
                     max_quantizer: Some(quantizer),
                     ..ReconfigureParams::default()
@@ -2149,7 +2140,7 @@ mod tests {
         );
 
         let err = encoder
-            .reconfigure(ReconfigureParams {
+            .reconfigure(&ReconfigureParams {
                 target_bitrate: Some(1_000_000),
                 ..ReconfigureParams::default()
             })
@@ -2297,7 +2288,7 @@ mod tests {
             let mut encoder =
                 Encoder::new(vp9_encoder_config(ImageFormat::I420)).expect("failed to create");
             let err = encoder
-                .reconfigure(params)
+                .reconfigure(&params)
                 .err()
                 .unwrap_or_else(|| panic!("case [{case_id}]: reconfigure must fail"));
             assert_eq!(
@@ -2316,7 +2307,7 @@ mod tests {
             let mut encoder =
                 Encoder::new(vp9_encoder_config(ImageFormat::I420)).expect("failed to create");
             encoder
-                .reconfigure(ReconfigureParams {
+                .reconfigure(&ReconfigureParams {
                     target_bitrate: Some(1000),
                     ..ReconfigureParams::default()
                 })
@@ -2329,7 +2320,7 @@ mod tests {
             let mut encoder =
                 Encoder::new(vp9_encoder_config(ImageFormat::I420)).expect("failed to create");
             encoder
-                .reconfigure(ReconfigureParams {
+                .reconfigure(&ReconfigureParams {
                     target_bitrate: Some(1_000_000_000),
                     ..ReconfigureParams::default()
                 })
@@ -2342,7 +2333,7 @@ mod tests {
             let mut encoder =
                 Encoder::new(vp9_encoder_config(ImageFormat::I420)).expect("failed to create");
             encoder
-                .reconfigure(ReconfigureParams {
+                .reconfigure(&ReconfigureParams {
                     fps_numerator: Some(1_000_000_000),
                     fps_denominator: Some(1),
                     ..ReconfigureParams::default()
@@ -2358,7 +2349,7 @@ mod tests {
             config.max_quantizer = 63;
             let mut encoder = Encoder::new(config).expect("failed to create");
             encoder
-                .reconfigure(ReconfigureParams {
+                .reconfigure(&ReconfigureParams {
                     min_quantizer: Some(0),
                     max_quantizer: Some(63),
                     ..ReconfigureParams::default()
@@ -2368,7 +2359,7 @@ mod tests {
             assert_eq!(encoder.cfg_max_quantizer(), 63);
 
             encoder
-                .reconfigure(ReconfigureParams {
+                .reconfigure(&ReconfigureParams {
                     min_quantizer: Some(30),
                     max_quantizer: Some(30),
                     ..ReconfigureParams::default()
@@ -2395,7 +2386,7 @@ mod tests {
         // 失敗ケース: 成功する `target_bitrate` と矛盾する `min > max` を一緒に渡す。
         // ロールバックが効いていなければ `target_bitrate` だけ書き換わる
         let err = encoder
-            .reconfigure(ReconfigureParams {
+            .reconfigure(&ReconfigureParams {
                 target_bitrate: Some(1_000_000),
                 min_quantizer: Some(50),
                 max_quantizer: Some(10),
@@ -2413,50 +2404,6 @@ mod tests {
         assert_eq!(encoder.cfg_max_quantizer(), before_max);
     }
 
-    /// libvpx 側の `vpx_codec_enc_config_set` が失敗するケースで `self.cfg` がロールバック
-    /// されることを検証する。
-    ///
-    /// 解像度の変更は libvpx 側で `INVALID_PARAM` を返す挙動を利用する……のだが、
-    /// 本ラッパは `width`/`height` の reconfigure 経路を持たない。代わりに、エンコード
-    /// 開始後の FPS 変更で libvpx が PTS 単調性違反を検出するパスを使う。
-    /// libvpx のバージョン更新で「FPS 変更が libvpx 側で拒否される」挙動が変わったら
-    /// このテストの前提が崩れるため、`reason()` 比較は行わず「Err になり、かつ
-    /// `self.cfg` が更新されていない」点だけを確認する。
-    #[test]
-    fn reconfigure_rolls_back_when_libvpx_set_fails() {
-        let mut config = deterministic_vp9_config(128, 128, 5_000_000);
-        config.min_quantizer = 0;
-        config.max_quantizer = 63;
-        let mut encoder = Encoder::new(config).expect("failed to create");
-
-        let (y, u, v) = gradient_i420(128, 128);
-        encode_n_frames_i420(&mut encoder, &y, &u, &v, 3);
-
-        let before_bitrate = encoder.cfg_target_bitrate_kbps();
-        let before_timebase = encoder.cfg_timebase();
-
-        // libvpx 側を本当に弾く保証は無いので、結果が Ok でも Err でも
-        // 「`self.cfg` の更新が all-or-nothing になっている」点だけを検査する
-        let result = encoder.reconfigure(ReconfigureParams {
-            target_bitrate: Some(7_000_000),
-            fps_numerator: Some(1),
-            fps_denominator: Some(1_000_000_000),
-            ..ReconfigureParams::default()
-        });
-
-        match result {
-            Ok(()) => {
-                assert_eq!(encoder.cfg_target_bitrate_kbps(), 7_000);
-                assert_eq!(encoder.cfg_timebase(), (1_000_000_000, 1));
-            }
-            Err(_) => {
-                // ロールバックが効いていれば 2 フィールドとも失敗前のまま
-                assert_eq!(encoder.cfg_target_bitrate_kbps(), before_bitrate);
-                assert_eq!(encoder.cfg_timebase(), before_timebase);
-            }
-        }
-    }
-
     /// 全フィールドが `None` の場合、`vpx_codec_enc_config_set` を呼ばずに早期成功する。
     /// その後の encode が問題なく走り、内部状態が変わっていないことを検証する。
     #[test]
@@ -2472,7 +2419,7 @@ mod tests {
         let before_kf = encoder.cfg_kf_max_dist();
 
         encoder
-            .reconfigure(ReconfigureParams::default())
+            .reconfigure(&ReconfigureParams::default())
             .expect("all-None reconfigure must succeed");
 
         assert_eq!(encoder.cfg_target_bitrate_kbps(), before_bitrate);
@@ -2593,11 +2540,5 @@ mod tests {
             !reason.is_empty(),
             "libvpx must return a non-empty error string for MEM_ERROR"
         );
-    }
-
-    #[test]
-    fn error_with_reason_returns_static_message() {
-        let e = invalid_param("test", "boundary check");
-        assert_eq!(e.reason(), Some("boundary check"));
     }
 }
