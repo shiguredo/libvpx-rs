@@ -695,15 +695,226 @@ pub struct EncodeOptions {
     pub force_keyframe: bool,
 }
 
+/// エンコーダー再設定パラメータ
+///
+/// [`Encoder::reconfigure`] で動的に変更可能なパラメータ。本構造体に含まれる
+/// フィールドのみが変更対象で、それ以外 (`width` / `height` / `image_format` /
+/// `vpx_codec_control_` 経由のすべての設定) は再設定不可。`None` の項目は直前の値を
+/// 維持する。
+///
+/// `fps_numerator` と `fps_denominator` は両方同時に指定するか、両方とも `None` に
+/// する必要がある。
+///
+/// FPS を変更すると [`Encoder::encode`] が libvpx に渡すタイムベース (`g_timebase`)
+/// が変わる。一方で本ラッパは PTS にフレーム番号 (`Encoder::frame_count`) を渡して
+/// おり、FPS 変更直後の最初の `encode` で libvpx が PTS の単調性違反を検出して
+/// エラーを返す可能性がある。現状の API では FPS 変更後の PTS 単調性を担保できない
+/// ため、FPS の動的変更は推奨しない。どうしても変更が必要な場合は、`force_keyframe`
+/// を立てて境界を明示する運用にする。
+#[derive(Debug, Clone, Default)]
+#[non_exhaustive]
+pub struct ReconfigureParams {
+    /// エンコードビットレート (bps)
+    ///
+    /// 1000 bps 以上 1_000_000_000 bps 以下を要求する。1000 未満は libvpx の kbps
+    /// 解像度で表現できないため拒否、上限は libvpx の silent clip を回避するため
+    /// 事前拒否する。
+    pub target_bitrate: Option<usize>,
+
+    /// FPS の分子
+    pub fps_numerator: Option<usize>,
+
+    /// FPS の分母
+    pub fps_denominator: Option<usize>,
+
+    /// 最小量子化値
+    pub min_quantizer: Option<usize>,
+
+    /// 最大量子化値
+    pub max_quantizer: Option<usize>,
+
+    /// キーフレーム最大間隔 (フレーム数、libvpx の `kf_max_dist` に対応)
+    pub keyframe_interval: Option<NonZeroUsize>,
+}
+
+impl ReconfigureParams {
+    /// `EncoderConfig` から `ReconfigureParams` を構築する内部コンバータ
+    ///
+    /// `Encoder::new` と `Encoder::reconfigure` の検査ロジックを
+    /// `merge_reconfigure_params_into_cfg` に集約するためにのみ使う
+    fn from_encoder_config(config: &EncoderConfig) -> Self {
+        Self {
+            target_bitrate: Some(config.target_bitrate),
+            fps_numerator: Some(config.fps_numerator),
+            fps_denominator: Some(config.fps_denominator),
+            min_quantizer: Some(config.min_quantizer),
+            max_quantizer: Some(config.max_quantizer),
+            keyframe_interval: config.keyframe_interval,
+        }
+    }
+
+    /// 全フィールドが `None` か（= 何も変更しない指示か）を返す
+    fn is_empty(&self) -> bool {
+        self.target_bitrate.is_none()
+            && self.fps_numerator.is_none()
+            && self.fps_denominator.is_none()
+            && self.min_quantizer.is_none()
+            && self.max_quantizer.is_none()
+            && self.keyframe_interval.is_none()
+    }
+}
+
 /// VP8 / VP9 エンコーダー
 pub struct Encoder {
     ctx: sys::vpx_codec_ctx,
+    // 1-pass 専用前提でシャローコピー可能とみなしている (2-pass バッファは常に NULL)
+    // 2-pass 対応を追加する際はシャローコピー前提が崩れるため、ここを再設計する必要がある
+    cfg: sys::vpx_codec_enc_cfg,
     img: sys::vpx_image,
     iter: sys::vpx_codec_iter_t,
     frame_count: usize,
     deadline: EncodingDeadline,
     image_format: ImageFormat,
     plane_sizes: PlaneSizes,
+}
+
+/// `INVALID_PARAM` のエラーを生成する内部ヘルパー
+fn invalid_param(function: &'static str, reason: &'static str) -> Error {
+    Error::with_reason(
+        sys::vpx_codec_err_t_VPX_CODEC_INVALID_PARAM,
+        function,
+        reason,
+    )
+}
+
+/// libvpx の `g_timebase.num` / `g_timebase.den` の上限値。
+///
+/// 出典: libvpx `vp9/vp9_cx_iface.c` および `vp8/vp8_cx_iface.c` の
+/// `validate_config()`。`RANGE_CHECK(cfg, g_timebase.{num,den}, 1, 1000000000)`。
+/// libvpx の更新で変わる可能性がある。
+const VPX_MAX_TIMEBASE: usize = 1_000_000_000;
+
+/// libvpx が許容する `rc_max_quantizer` の上限値 (= 63)。
+///
+/// 出典: libvpx `vp9/vp9_cx_iface.c` の `validate_config()`。
+/// `RANGE_CHECK_HI(cfg, rc_max_quantizer, 63)`。VP8 は明示的な上限を持たないが、
+/// 量子化ステップの定義上 0-63 を要求する。libvpx の更新で変わる可能性がある。
+const VPX_MAX_QUANTIZER: c_uint = 63;
+
+/// libvpx が許容する `rc_target_bitrate` の上限値 (kbps)。
+///
+/// 出典: libvpx `vp9/vp9_cx_iface.c` の `set_encoder_config()` と
+/// `vp8/vp8_cx_iface.c` の `set_vp8_encoder_config()`。
+/// `VPXMIN(..., 1000000)` で silent clip される。libvpx の更新で変わる可能性がある。
+const VPX_MAX_TARGET_BITRATE_KBPS: c_uint = 1_000_000;
+
+/// `VPX_MAX_TARGET_BITRATE_KBPS` を bps 単位で表したもの (= 1_000_000_000)。
+///
+/// 本ラッパは `target_bitrate` を bps で受け取り `/ 1000` で kbps に変換するが、
+/// 単純な整数除算では `1_000_000_999` bps のような値が `1_000_000` kbps に
+/// silent truncate されてしまう。それを防ぐため bps 段階で上限を弾く。
+const VPX_MAX_TARGET_BITRATE_BPS: usize = VPX_MAX_TARGET_BITRATE_KBPS as usize * 1000;
+
+/// `ReconfigureParams` の各フィールドを検査して `vpx_codec_enc_cfg` にマージする
+///
+/// `Encoder::new` と `Encoder::reconfigure` 双方から呼ばれる共通ロジック。
+/// `function` はエラー時に `Error::function` として埋め込まれる呼び出し元名。
+///
+/// 検査は libvpx 内部の silent clip を完全に潰す方向に倒している。許容範囲外は
+/// すべて `VPX_CODEC_INVALID_PARAM` で拒否する。
+///
+/// 注意: `min_quantizer` と `max_quantizer` の関係検査は、`params` の値だけでなく
+/// 現在の `cfg` に既に格納された値も含めて行われる。例えば `min_quantizer` のみを
+/// `Some` で渡した場合、検査対象は「新しい min」と「現在の `cfg.rc_max_quantizer`」
+/// の組になる。
+fn merge_reconfigure_params_into_cfg(
+    cfg: &mut sys::vpx_codec_enc_cfg,
+    params: &ReconfigureParams,
+    function: &'static str,
+) -> Result<(), Error> {
+    if let Some(target_bitrate) = params.target_bitrate {
+        // libvpx の `rc_target_bitrate` は kbps 単位。bps からの変換時に整数除算で
+        // silent truncation されるのを防ぐため、kbps 上限値 * 1000 を超える bps を
+        // 最初に弾く
+        if target_bitrate > VPX_MAX_TARGET_BITRATE_BPS {
+            return Err(invalid_param(
+                function,
+                "target_bitrate exceeds libvpx maximum (1_000_000_000 bps)",
+            ));
+        }
+        let kbps = target_bitrate / 1000;
+        if kbps == 0 {
+            return Err(invalid_param(
+                function,
+                "target_bitrate must be at least 1000 bps (libvpx kbps resolution)",
+            ));
+        }
+        // 上の上限検査で kbps <= VPX_MAX_TARGET_BITRATE_KBPS (1_000_000) が保証されるため c_uint に必ず収まる
+        cfg.rc_target_bitrate = kbps as c_uint;
+    }
+
+    match (params.fps_numerator, params.fps_denominator) {
+        (Some(_), None) | (None, Some(_)) => {
+            return Err(invalid_param(
+                function,
+                "fps_numerator and fps_denominator must be set together",
+            ));
+        }
+        (Some(num), Some(den)) => {
+            if num == 0 {
+                return Err(invalid_param(function, "fps_numerator must be non-zero"));
+            }
+            if den == 0 {
+                return Err(invalid_param(function, "fps_denominator must be non-zero"));
+            }
+            if num > VPX_MAX_TIMEBASE {
+                return Err(invalid_param(
+                    function,
+                    "fps_numerator exceeds libvpx maximum (1_000_000_000)",
+                ));
+            }
+            if den > VPX_MAX_TIMEBASE {
+                return Err(invalid_param(
+                    function,
+                    "fps_denominator exceeds libvpx maximum (1_000_000_000)",
+                ));
+            }
+            // libvpx の g_timebase は 1 フレームの提示時間 (秒) の分数表現
+            // (libvpx `vpx/vpx_encoder.h` の `vpx_codec_enc_cfg::g_timebase` の項参照)
+            // 上の上限検査で num, den <= VPX_MAX_TIMEBASE (1_000_000_000) が保証されるため c_int に必ず収まる
+            cfg.g_timebase.num = den as c_int;
+            cfg.g_timebase.den = num as c_int;
+        }
+        (None, None) => {}
+    }
+
+    if let Some(min_quantizer) = params.min_quantizer {
+        cfg.rc_min_quantizer = c_uint::try_from(min_quantizer)
+            .map_err(|_| invalid_param(function, "min_quantizer is out of range"))?;
+    }
+
+    if let Some(max_quantizer) = params.max_quantizer {
+        cfg.rc_max_quantizer = c_uint::try_from(max_quantizer)
+            .map_err(|_| invalid_param(function, "max_quantizer is out of range"))?;
+    }
+
+    if cfg.rc_max_quantizer > VPX_MAX_QUANTIZER {
+        return Err(invalid_param(function, "max_quantizer must not exceed 63"));
+    }
+
+    if cfg.rc_min_quantizer > cfg.rc_max_quantizer {
+        return Err(invalid_param(
+            function,
+            "min_quantizer must not exceed max_quantizer",
+        ));
+    }
+
+    if let Some(kf_interval) = params.keyframe_interval {
+        cfg.kf_max_dist = c_uint::try_from(kf_interval.get())
+            .map_err(|_| invalid_param(function, "keyframe_interval is out of range"))?;
+    }
+
+    Ok(())
 }
 
 impl Encoder {
@@ -729,12 +940,12 @@ impl Encoder {
         mut vpx_config: sys::vpx_codec_enc_cfg,
         iface: *const sys::vpx_codec_iface,
     ) -> Result<Self, Error> {
-        // 基本設定
-        vpx_config.g_w = encoder_config.width as c_uint;
-        vpx_config.g_h = encoder_config.height as c_uint;
-        vpx_config.rc_target_bitrate = encoder_config.target_bitrate as c_uint / 1000;
-        vpx_config.rc_min_quantizer = encoder_config.min_quantizer as c_uint;
-        vpx_config.rc_max_quantizer = encoder_config.max_quantizer as c_uint;
+        const FUNCTION: &str = "shiguredo_libvpx::Encoder::new";
+
+        vpx_config.g_w = c_uint::try_from(encoder_config.width)
+            .map_err(|_| invalid_param(FUNCTION, "width is out of range"))?;
+        vpx_config.g_h = c_uint::try_from(encoder_config.height)
+            .map_err(|_| invalid_param(FUNCTION, "height is out of range"))?;
 
         // プロファイル設定
         if let CodecConfig::Vp9(vp9_config) = &encoder_config.codec {
@@ -744,28 +955,38 @@ impl Encoder {
             };
         }
 
-        // FPS とは分子・分母の関係が逆になる
-        vpx_config.g_timebase.num = encoder_config.fps_denominator as c_int;
-        vpx_config.g_timebase.den = encoder_config.fps_numerator as c_int;
+        // ビットレート / FPS / 量子化レンジ / キーフレーム間隔は reconfigure と同じ検査で適用する
+        merge_reconfigure_params_into_cfg(
+            &mut vpx_config,
+            &ReconfigureParams::from_encoder_config(encoder_config),
+            FUNCTION,
+        )?;
+
+        // cq_level は VP9E_SET_CQ_LEVEL / VP8E_SET_CQEP に渡される。
+        // 出典: libvpx `vp9/vp9_cx_iface.c` の `ctrl_set_cq_level()`。有効レンジは 0-63。
+        if encoder_config.cq_level > VPX_MAX_QUANTIZER as usize {
+            return Err(invalid_param(FUNCTION, "cq_level must not exceed 63"));
+        }
+        // 上の上限検査で cq_level <= 63 が保証されるため c_uint に必ず収まる
+        let cq_level = encoder_config.cq_level as c_uint;
 
         if let Some(lag) = encoder_config.lag_in_frames {
-            vpx_config.g_lag_in_frames = lag.get() as c_uint;
+            vpx_config.g_lag_in_frames = c_uint::try_from(lag.get())
+                .map_err(|_| invalid_param(FUNCTION, "lag_in_frames is out of range"))?;
         }
 
         if let Some(threads) = encoder_config.threads {
-            vpx_config.g_threads = threads.get() as c_uint;
+            vpx_config.g_threads = c_uint::try_from(threads.get())
+                .map_err(|_| invalid_param(FUNCTION, "threads is out of range"))?;
         }
 
         if encoder_config.error_resilient {
             vpx_config.g_error_resilient = 1;
         }
 
-        if let Some(kf_interval) = encoder_config.keyframe_interval {
-            vpx_config.kf_max_dist = kf_interval.get() as c_uint;
-        }
-
         if let Some(threshold) = encoder_config.frame_drop_threshold {
-            vpx_config.rc_dropframe_thresh = threshold as c_uint;
+            vpx_config.rc_dropframe_thresh = c_uint::try_from(threshold)
+                .map_err(|_| invalid_param(FUNCTION, "frame_drop_threshold is out of range"))?;
         }
 
         // レート制御モード設定
@@ -876,6 +1097,7 @@ impl Encoder {
 
             let mut this = Self {
                 ctx: ctx.assume_init(),
+                cfg: vpx_config,
                 img,
                 iter: std::ptr::null(),
                 frame_count: 0,
@@ -885,11 +1107,11 @@ impl Encoder {
             };
             // NOTE: これ以降の操作に失敗しても ctx は Drop によって確実に解放される
 
-            // CQ Level設定
+            // CQ Level設定 (有効レンジ 0-63 は前段で検査済み)
             let code = sys::vpx_codec_control_(
                 &mut this.ctx,
                 sys::vp8e_enc_control_id_VP8E_SET_CQ_LEVEL as c_int,
-                encoder_config.cq_level as c_uint,
+                cq_level,
             );
             Error::check(code, "vpx_codec_control_", Some(&this.ctx))?;
 
@@ -1106,24 +1328,30 @@ impl Encoder {
         Ok(())
     }
 
+    /// `next_frame()` の戻り値が `None` になっていない状態（= まだ取り出していない
+    /// エンコード済みパケットが残っている可能性）でなければ `Ok(())` を返す内部ヘルパー
+    fn ensure_iter_drained(&self, function: &'static str) -> Result<(), Error> {
+        if !self.iter.is_null() {
+            return Err(Error::with_reason(
+                sys::vpx_codec_err_t_VPX_CODEC_ERROR,
+                function,
+                "still need to call shiguredo_libvpx::Encoder::next_frame()",
+            ));
+        }
+        Ok(())
+    }
+
     /// 画像データをエンコードする
     ///
     /// エンコード結果は [`Encoder::next_frame()`] で取得できる
     ///
     /// `image` のフォーマットはエンコーダー初期化時に指定した `ImageFormat` と一致する必要がある
     pub fn encode(&mut self, image: &ImageData<'_>, options: &EncodeOptions) -> Result<(), Error> {
-        if !self.iter.is_null() {
-            return Err(Error::with_reason(
-                sys::vpx_codec_err_t_VPX_CODEC_ERROR,
-                "shiguredo_libvpx::Encoder::encode",
-                "still need to call shiguredo_libvpx::Encoder::next_frame()",
-            ));
-        }
+        self.ensure_iter_drained("shiguredo_libvpx::Encoder::encode")?;
 
         // フォーマット整合性チェック
         if image.format() != self.image_format {
-            return Err(Error::with_reason(
-                sys::vpx_codec_err_t_VPX_CODEC_INVALID_PARAM,
+            return Err(invalid_param(
                 "shiguredo_libvpx::Encoder::encode",
                 "image format mismatch",
             ));
@@ -1148,8 +1376,7 @@ impl Encoder {
                 },
             ) => {
                 if y.len() != *y_size || u.len() != *u_size || v.len() != *v_size {
-                    return Err(Error::with_reason(
-                        sys::vpx_codec_err_t_VPX_CODEC_INVALID_PARAM,
+                    return Err(invalid_param(
                         "shiguredo_libvpx::Encoder::encode",
                         "invalid plane sizes",
                     ));
@@ -1157,8 +1384,7 @@ impl Encoder {
             }
             (ImageData::Nv12 { y, uv }, PlaneSizes::TwoPlanes { y_size, uv_size }) => {
                 if y.len() != *y_size || uv.len() != *uv_size {
-                    return Err(Error::with_reason(
-                        sys::vpx_codec_err_t_VPX_CODEC_INVALID_PARAM,
+                    return Err(invalid_param(
                         "shiguredo_libvpx::Encoder::encode",
                         "invalid plane sizes",
                     ));
@@ -1218,17 +1444,65 @@ impl Encoder {
         Ok(())
     }
 
+    /// エンコーダーのパラメータを動的に変更する
+    ///
+    /// ビットレート・FPS・量子化レンジ・キーフレーム間隔をエンコード中に変更する。
+    /// `params` の `None` のフィールドは直前の値を維持する。すべてのフィールドが
+    /// `None` の場合は何もせず `Ok(())` を返す (libvpx の `vpx_codec_enc_config_set`
+    /// を呼ばない)。変更可能な項目と制約は [`ReconfigureParams`] を参照。
+    ///
+    /// 本ラッパは libvpx の silent clip を起こさない範囲のみを受け付ける。許容範囲外
+    /// の値はすべて `VPX_CODEC_INVALID_PARAM` で拒否する。
+    ///
+    /// [`Encoder::next_frame`] のイテレーション途中（= libvpx 内部の cx data を
+    /// 一部だけ消費した状態）で呼び出すとエラーを返す。`encode` 直後でまだ
+    /// `next_frame` を呼んでいない状態は許容するが、`EncoderConfig::lag_in_frames`
+    /// を指定したエンコーダーでは libvpx 内部に未取り出しのパケットが蓄積している
+    /// 可能性があるため、`reconfigure` の前に `next_frame()` が `None` を返すまで
+    /// ドレインすることを推奨する。
+    ///
+    /// `min_quantizer` と `max_quantizer` の関係検査は、本呼び出しで渡した値だけ
+    /// でなく現在の値と組み合わせて行われる。例えば現在 `max_quantizer = 10` の
+    /// エンコーダーに `min_quantizer = Some(20)` のみを渡すと `min > max` で
+    /// 拒否される。両者を同時に変更したい場合は両方を `Some` で渡すこと。
+    ///
+    /// 失敗した場合は内部設定 (`self.cfg`) を変更しない。ラッパー側の事前検査で
+    /// 失敗した場合は libvpx の `vpx_codec_enc_config_set` 自体を呼ばない。
+    pub fn reconfigure(&mut self, params: &ReconfigureParams) -> Result<(), Error> {
+        const FUNCTION: &str = "shiguredo_libvpx::Encoder::reconfigure";
+
+        // 2-pass バッファが NULL であることを保証する。`Encoder::cfg` のシャロー
+        // コピー前提が崩れていないことを release ビルドでも検査する
+        assert!(
+            self.cfg.rc_twopass_stats_in.buf.is_null(),
+            "rc_twopass_stats_in must be null in 1-pass mode"
+        );
+        assert!(
+            self.cfg.rc_firstpass_mb_stats_in.buf.is_null(),
+            "rc_firstpass_mb_stats_in must be null in 1-pass mode"
+        );
+
+        self.ensure_iter_drained(FUNCTION)?;
+
+        // 全フィールドが None の場合は libvpx を呼ばずに早期成功させる
+        if params.is_empty() {
+            return Ok(());
+        }
+
+        let mut new_cfg = self.cfg;
+        merge_reconfigure_params_into_cfg(&mut new_cfg, params, FUNCTION)?;
+
+        let code = unsafe { sys::vpx_codec_enc_config_set(&mut self.ctx, &new_cfg) };
+        Error::check(code, "vpx_codec_enc_config_set", Some(&self.ctx))?;
+        self.cfg = new_cfg;
+        Ok(())
+    }
+
     /// これ以上データが来ないことをエンコーダーに伝える
     ///
     /// 残りのエンコード結果は [`Encoder::next_frame()`] で取得できる
     pub fn finish(&mut self) -> Result<(), Error> {
-        if !self.iter.is_null() {
-            return Err(Error::with_reason(
-                sys::vpx_codec_err_t_VPX_CODEC_ERROR,
-                "shiguredo_libvpx::Encoder::finish",
-                "still need to call shiguredo_libvpx::Encoder::next_frame()",
-            ));
-        }
+        self.ensure_iter_drained("shiguredo_libvpx::Encoder::finish")?;
 
         let code = unsafe {
             sys::vpx_codec_encode(
@@ -1266,6 +1540,34 @@ impl Encoder {
             }
         }
         None
+    }
+}
+
+#[cfg(test)]
+impl Encoder {
+    /// テスト専用: 現在の `cfg.rc_target_bitrate` (kbps) を返す
+    fn cfg_target_bitrate_kbps(&self) -> c_uint {
+        self.cfg.rc_target_bitrate
+    }
+
+    /// テスト専用: 現在の `cfg.rc_min_quantizer` を返す
+    fn cfg_min_quantizer(&self) -> c_uint {
+        self.cfg.rc_min_quantizer
+    }
+
+    /// テスト専用: 現在の `cfg.rc_max_quantizer` を返す
+    fn cfg_max_quantizer(&self) -> c_uint {
+        self.cfg.rc_max_quantizer
+    }
+
+    /// テスト専用: 現在の `cfg.kf_max_dist` を返す
+    fn cfg_kf_max_dist(&self) -> c_uint {
+        self.cfg.kf_max_dist
+    }
+
+    /// テスト専用: 現在の `cfg.g_timebase.(num, den)` を返す
+    fn cfg_timebase(&self) -> (c_int, c_int) {
+        (self.cfg.g_timebase.num, self.cfg.g_timebase.den)
     }
 }
 
@@ -1619,6 +1921,586 @@ mod tests {
         assert!(result.is_err());
     }
 
+    // テスト用ヘルパ群。reconfigure 関連と Encoder::new 関連で共用する
+
+    /// 黒一色の I420 プレーンを生成する
+    fn black_i420(width: usize, height: usize) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+        let size = width * height;
+        (vec![0; size], vec![0; size / 4], vec![0; size / 4])
+    }
+
+    /// `width`/`height` で横方向に Y 勾配を、縦方向に U/V 勾配を持つ I420 を生成する
+    /// (4:2:0 のクロマサブサンプリング前提のため偶数かつ 4 以上の解像度のみ)
+    fn gradient_i420(width: usize, height: usize) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+        assert!(width >= 4 && height >= 4 && width.is_multiple_of(2) && height.is_multiple_of(2));
+        let mut y = vec![0u8; width * height];
+        let uv_w = width / 2;
+        let uv_h = height / 2;
+        let mut u = vec![128u8; uv_w * uv_h];
+        let mut v = vec![128u8; uv_w * uv_h];
+        for row in 0..height {
+            for col in 0..width {
+                y[row * width + col] = ((col * 255) / (width - 1)) as u8;
+            }
+        }
+        for row in 0..uv_h {
+            for col in 0..uv_w {
+                u[row * uv_w + col] = ((row * 255) / (uv_h - 1)) as u8;
+                v[row * uv_w + col] = (255 - (row * 255) / (uv_h - 1)) as u8;
+            }
+        }
+        (y, u, v)
+    }
+
+    fn encode_i420(encoder: &mut Encoder, y: &[u8], u: &[u8], v: &[u8]) {
+        encoder
+            .encode(
+                &ImageData::I420 { y, u, v },
+                &EncodeOptions {
+                    force_keyframe: false,
+                },
+            )
+            .expect("failed to encode");
+    }
+
+    fn drain_frames(encoder: &mut Encoder) -> usize {
+        let mut total = 0usize;
+        while let Some(frame) = encoder.next_frame() {
+            total += frame.data().len();
+        }
+        total
+    }
+
+    /// `n` 枚エンコードして全フレームをドレインし、出力バイト数の合計を返す
+    fn encode_n_frames_i420(
+        encoder: &mut Encoder,
+        y: &[u8],
+        u: &[u8],
+        v: &[u8],
+        n: usize,
+    ) -> usize {
+        let mut total = 0usize;
+        for _ in 0..n {
+            encode_i420(encoder, y, u, v);
+            total += drain_frames(encoder);
+        }
+        total
+    }
+
+    /// テスト用に決定論的な VP9 EncoderConfig を返す
+    fn deterministic_vp9_config(
+        width: usize,
+        height: usize,
+        target_bitrate: usize,
+    ) -> EncoderConfig {
+        let mut config = EncoderConfig::new(
+            width,
+            height,
+            ImageFormat::I420,
+            CodecConfig::Vp9(Vp9Config::default()),
+        );
+        config.target_bitrate = target_bitrate;
+        config.threads = NonZeroUsize::new(1);
+        config.deadline = EncodingDeadline::Realtime;
+        config.error_resilient = true;
+        config
+    }
+
+    fn run_reconfigure_changes_basic_fields(config: EncoderConfig) {
+        let (y, u, v) = black_i420(config.width, config.height);
+        let mut encoder = Encoder::new(config).expect("failed to create");
+
+        encode_i420(&mut encoder, &y, &u, &v);
+        drain_frames(&mut encoder);
+
+        encoder
+            .reconfigure(&ReconfigureParams {
+                target_bitrate: Some(500_000),
+                fps_numerator: Some(60),
+                fps_denominator: Some(1),
+                keyframe_interval: NonZeroUsize::new(60),
+                ..ReconfigureParams::default()
+            })
+            .expect("failed to reconfigure");
+
+        // cfg getter で reconfigure が反映されたことを直接観測する
+        assert_eq!(encoder.cfg_target_bitrate_kbps(), 500);
+        assert_eq!(encoder.cfg_timebase(), (1, 60));
+        assert_eq!(encoder.cfg_kf_max_dist(), 60);
+
+        encode_i420(&mut encoder, &y, &u, &v);
+        drain_frames(&mut encoder);
+
+        encoder.finish().expect("failed to finish");
+        drain_frames(&mut encoder);
+    }
+
+    #[test]
+    fn reconfigure_vp9_changes_bitrate_fps_keyframe_interval() {
+        run_reconfigure_changes_basic_fields(vp9_encoder_config(ImageFormat::I420));
+    }
+
+    #[test]
+    fn reconfigure_vp8_changes_bitrate_fps_keyframe_interval() {
+        run_reconfigure_changes_basic_fields(vp8_encoder_config(ImageFormat::I420));
+    }
+
+    /// `min_quantizer` 単独設定時、現在の `max_quantizer` と比較されることを検証する
+    #[test]
+    fn reconfigure_partial_min_quantizer_uses_current_max() {
+        // 現在の状態を max_quantizer = 10 にする
+        let mut config = vp9_encoder_config(ImageFormat::I420);
+        config.min_quantizer = 0;
+        config.max_quantizer = 10;
+        let mut encoder = Encoder::new(config).expect("failed to create");
+        assert_eq!(encoder.cfg_max_quantizer(), 10);
+
+        // min_quantizer = 20 だけ渡すと、現在の max = 10 と比較されて拒否される
+        let err = encoder
+            .reconfigure(&ReconfigureParams {
+                min_quantizer: Some(20),
+                ..ReconfigureParams::default()
+            })
+            .expect_err("partial reconfigure must be rejected when min > current max");
+        assert_eq!(
+            err.reason(),
+            Some("min_quantizer must not exceed max_quantizer")
+        );
+
+        // ラッパー側事前検査で弾かれており、内部状態は最初から変更されていない
+        assert_eq!(encoder.cfg_min_quantizer(), 0);
+        assert_eq!(encoder.cfg_max_quantizer(), 10);
+
+        // 両方同時に渡せば成功する
+        encoder
+            .reconfigure(&ReconfigureParams {
+                min_quantizer: Some(20),
+                max_quantizer: Some(40),
+                ..ReconfigureParams::default()
+            })
+            .expect("failed to reconfigure");
+        assert_eq!(encoder.cfg_min_quantizer(), 20);
+        assert_eq!(encoder.cfg_max_quantizer(), 40);
+    }
+
+    /// 量子化レンジを 0 に固定したエンコードと 63 に固定したエンコードで出力サイズを比較する。
+    /// `reconfigure` が no-op に退化していたら両者は同等になるので比率で検出する。
+    /// 決定論性のため `threads = 1` / `deadline = Realtime` / `error_resilient = true` で固定。
+    #[test]
+    fn reconfigure_low_quantizer_yields_far_more_bytes_than_high_quantizer() {
+        const WIDTH: usize = 128;
+        const HEIGHT: usize = 128;
+        const FRAMES: usize = 20;
+
+        fn total_bytes_with_quantizer(quantizer: usize) -> usize {
+            // 量子化レンジを 0 固定する側で CBR cap に頭打ちされないように上限を十分大きく取る
+            let mut config = deterministic_vp9_config(WIDTH, HEIGHT, 50_000_000);
+            config.min_quantizer = 0;
+            config.max_quantizer = 63;
+            let mut encoder = Encoder::new(config).expect("failed to create");
+
+            encoder
+                .reconfigure(&ReconfigureParams {
+                    min_quantizer: Some(quantizer),
+                    max_quantizer: Some(quantizer),
+                    ..ReconfigureParams::default()
+                })
+                .expect("failed to reconfigure");
+
+            let (y, u, v) = gradient_i420(WIDTH, HEIGHT);
+            let mut total = encode_n_frames_i420(&mut encoder, &y, &u, &v, FRAMES);
+            encoder.finish().expect("failed to finish");
+            total += drain_frames(&mut encoder);
+            total
+        }
+
+        let q0_bytes = total_bytes_with_quantizer(0);
+        let q63_bytes = total_bytes_with_quantizer(63);
+        // VP9 Realtime / error_resilient での 128x128 / 20 frames では実測比率が
+        // 2 倍前後なので、単調性 (`>`) より強い 2 倍以上を要求する。
+        // reconfigure が no-op に退化していたら同等になるので 2 倍で十分検出できる
+        assert!(
+            q0_bytes >= q63_bytes.saturating_mul(2),
+            "expected q=0 ({q0_bytes}) to be >= 2x q=63 ({q63_bytes})",
+        );
+    }
+
+    /// `iter` が non-null の状態で `reconfigure` が「順序違反」として弾かれることを検証する
+    /// (VP8 は 1 フレーム encode 直後に `next_frame()` がパケットを返すため確実に iter を進められる)
+    #[test]
+    fn reconfigure_while_iter_active_is_rejected() {
+        let config = vp8_encoder_config(ImageFormat::I420);
+        let (y, u, v) = black_i420(config.width, config.height);
+        let mut encoder = Encoder::new(config).expect("failed to create");
+
+        encode_i420(&mut encoder, &y, &u, &v);
+        assert!(
+            encoder.next_frame().is_some(),
+            "VP8 should produce a frame after encode"
+        );
+
+        let err = encoder
+            .reconfigure(&ReconfigureParams {
+                target_bitrate: Some(1_000_000),
+                ..ReconfigureParams::default()
+            })
+            .expect_err("reconfigure must fail when iter is active");
+        assert_eq!(
+            err.reason(),
+            Some("still need to call shiguredo_libvpx::Encoder::next_frame()")
+        );
+
+        drain_frames(&mut encoder);
+    }
+
+    #[test]
+    fn reconfigure_rejects_invalid_params() {
+        let cases: Vec<(&'static str, ReconfigureParams, &'static str)> = vec![
+            (
+                "target_bitrate=0",
+                ReconfigureParams {
+                    target_bitrate: Some(0),
+                    ..ReconfigureParams::default()
+                },
+                "target_bitrate must be at least 1000 bps (libvpx kbps resolution)",
+            ),
+            (
+                "target_bitrate=999",
+                ReconfigureParams {
+                    target_bitrate: Some(999),
+                    ..ReconfigureParams::default()
+                },
+                "target_bitrate must be at least 1000 bps (libvpx kbps resolution)",
+            ),
+            (
+                "target_bitrate=1_000_000_001 (bps→kbps silent truncation 境界)",
+                ReconfigureParams {
+                    target_bitrate: Some(1_000_000_001),
+                    ..ReconfigureParams::default()
+                },
+                "target_bitrate exceeds libvpx maximum (1_000_000_000 bps)",
+            ),
+            (
+                "target_bitrate=2_000_000_000",
+                ReconfigureParams {
+                    target_bitrate: Some(2_000_000_000),
+                    ..ReconfigureParams::default()
+                },
+                "target_bitrate exceeds libvpx maximum (1_000_000_000 bps)",
+            ),
+            (
+                "target_bitrate=usize::MAX",
+                ReconfigureParams {
+                    target_bitrate: Some(usize::MAX),
+                    ..ReconfigureParams::default()
+                },
+                "target_bitrate exceeds libvpx maximum (1_000_000_000 bps)",
+            ),
+            (
+                "fps_numerator のみ",
+                ReconfigureParams {
+                    fps_numerator: Some(60),
+                    ..ReconfigureParams::default()
+                },
+                "fps_numerator and fps_denominator must be set together",
+            ),
+            (
+                "fps_denominator のみ",
+                ReconfigureParams {
+                    fps_denominator: Some(1),
+                    ..ReconfigureParams::default()
+                },
+                "fps_numerator and fps_denominator must be set together",
+            ),
+            (
+                "fps_numerator=0",
+                ReconfigureParams {
+                    fps_numerator: Some(0),
+                    fps_denominator: Some(1),
+                    ..ReconfigureParams::default()
+                },
+                "fps_numerator must be non-zero",
+            ),
+            (
+                "fps_denominator=0",
+                ReconfigureParams {
+                    fps_numerator: Some(30),
+                    fps_denominator: Some(0),
+                    ..ReconfigureParams::default()
+                },
+                "fps_denominator must be non-zero",
+            ),
+            (
+                "fps_numerator=1_000_000_001",
+                ReconfigureParams {
+                    fps_numerator: Some(1_000_000_001),
+                    fps_denominator: Some(1),
+                    ..ReconfigureParams::default()
+                },
+                "fps_numerator exceeds libvpx maximum (1_000_000_000)",
+            ),
+            (
+                "fps_denominator=1_000_000_001",
+                ReconfigureParams {
+                    fps_numerator: Some(30),
+                    fps_denominator: Some(1_000_000_001),
+                    ..ReconfigureParams::default()
+                },
+                "fps_denominator exceeds libvpx maximum (1_000_000_000)",
+            ),
+            (
+                "fps_numerator=usize::MAX",
+                ReconfigureParams {
+                    fps_numerator: Some(usize::MAX),
+                    fps_denominator: Some(1),
+                    ..ReconfigureParams::default()
+                },
+                "fps_numerator exceeds libvpx maximum (1_000_000_000)",
+            ),
+            (
+                "min_quantizer=usize::MAX",
+                ReconfigureParams {
+                    min_quantizer: Some(usize::MAX),
+                    ..ReconfigureParams::default()
+                },
+                "min_quantizer is out of range",
+            ),
+            (
+                "min > max",
+                ReconfigureParams {
+                    min_quantizer: Some(50),
+                    max_quantizer: Some(10),
+                    ..ReconfigureParams::default()
+                },
+                "min_quantizer must not exceed max_quantizer",
+            ),
+            (
+                "max_quantizer=64",
+                ReconfigureParams {
+                    max_quantizer: Some(64),
+                    ..ReconfigureParams::default()
+                },
+                "max_quantizer must not exceed 63",
+            ),
+        ];
+
+        for (case_id, params, expected_reason) in cases {
+            let mut encoder =
+                Encoder::new(vp9_encoder_config(ImageFormat::I420)).expect("failed to create");
+            let err = encoder
+                .reconfigure(&params)
+                .err()
+                .unwrap_or_else(|| panic!("case [{case_id}]: reconfigure must fail"));
+            assert_eq!(
+                err.reason(),
+                Some(expected_reason),
+                "case [{case_id}]: expected reason mismatch",
+            );
+        }
+    }
+
+    /// 上限・下限の境界値が **成功** する側で通ることを検証する
+    #[test]
+    fn reconfigure_accepts_boundary_values() {
+        // target_bitrate = 1000 (kbps=1, 最小成功)
+        {
+            let mut encoder =
+                Encoder::new(vp9_encoder_config(ImageFormat::I420)).expect("failed to create");
+            encoder
+                .reconfigure(&ReconfigureParams {
+                    target_bitrate: Some(1000),
+                    ..ReconfigureParams::default()
+                })
+                .expect("target_bitrate=1000 must succeed");
+            assert_eq!(encoder.cfg_target_bitrate_kbps(), 1);
+        }
+
+        // target_bitrate = 1_000_000_000 (= VPX_MAX_TARGET_BITRATE_BPS, 最大成功)
+        {
+            let mut encoder =
+                Encoder::new(vp9_encoder_config(ImageFormat::I420)).expect("failed to create");
+            encoder
+                .reconfigure(&ReconfigureParams {
+                    target_bitrate: Some(1_000_000_000),
+                    ..ReconfigureParams::default()
+                })
+                .expect("target_bitrate=1_000_000_000 must succeed");
+            assert_eq!(encoder.cfg_target_bitrate_kbps(), 1_000_000);
+        }
+
+        // fps = 1_000_000_000 / 1 (上限境界、成功側)
+        {
+            let mut encoder =
+                Encoder::new(vp9_encoder_config(ImageFormat::I420)).expect("failed to create");
+            encoder
+                .reconfigure(&ReconfigureParams {
+                    fps_numerator: Some(1_000_000_000),
+                    fps_denominator: Some(1),
+                    ..ReconfigureParams::default()
+                })
+                .expect("fps_numerator=1_000_000_000 must succeed");
+            assert_eq!(encoder.cfg_timebase(), (1, 1_000_000_000));
+        }
+
+        // min == max (同値) と max=63, min=0 の境界
+        {
+            let mut config = vp9_encoder_config(ImageFormat::I420);
+            config.min_quantizer = 0;
+            config.max_quantizer = 63;
+            let mut encoder = Encoder::new(config).expect("failed to create");
+            encoder
+                .reconfigure(&ReconfigureParams {
+                    min_quantizer: Some(0),
+                    max_quantizer: Some(63),
+                    ..ReconfigureParams::default()
+                })
+                .expect("min=0,max=63 must succeed");
+            assert_eq!(encoder.cfg_min_quantizer(), 0);
+            assert_eq!(encoder.cfg_max_quantizer(), 63);
+
+            encoder
+                .reconfigure(&ReconfigureParams {
+                    min_quantizer: Some(30),
+                    max_quantizer: Some(30),
+                    ..ReconfigureParams::default()
+                })
+                .expect("min==max must succeed");
+            assert_eq!(encoder.cfg_min_quantizer(), 30);
+            assert_eq!(encoder.cfg_max_quantizer(), 30);
+        }
+    }
+
+    /// `reconfigure` 失敗時の `self.cfg` がロールバックされていることを直接観測する
+    #[test]
+    fn reconfigure_failure_rolls_back_internal_state() {
+        let mut config = vp9_encoder_config(ImageFormat::I420);
+        config.target_bitrate = 5_000_000;
+        config.min_quantizer = 0;
+        config.max_quantizer = 63;
+        let mut encoder = Encoder::new(config).expect("failed to create");
+
+        let before_bitrate = encoder.cfg_target_bitrate_kbps();
+        let before_min = encoder.cfg_min_quantizer();
+        let before_max = encoder.cfg_max_quantizer();
+
+        // 失敗ケース: 成功する `target_bitrate` と矛盾する `min > max` を一緒に渡す。
+        // ロールバックが効いていなければ `target_bitrate` だけ書き換わる
+        let err = encoder
+            .reconfigure(&ReconfigureParams {
+                target_bitrate: Some(1_000_000),
+                min_quantizer: Some(50),
+                max_quantizer: Some(10),
+                ..ReconfigureParams::default()
+            })
+            .expect_err("must fail by min > max");
+        assert_eq!(
+            err.reason(),
+            Some("min_quantizer must not exceed max_quantizer")
+        );
+
+        // self.cfg のすべてのフィールドが失敗前のまま
+        assert_eq!(encoder.cfg_target_bitrate_kbps(), before_bitrate);
+        assert_eq!(encoder.cfg_min_quantizer(), before_min);
+        assert_eq!(encoder.cfg_max_quantizer(), before_max);
+    }
+
+    /// 全フィールドが `None` の場合、`vpx_codec_enc_config_set` を呼ばずに早期成功する。
+    /// その後の encode が問題なく走り、内部状態が変わっていないことを検証する。
+    #[test]
+    fn reconfigure_all_none_is_noop_and_does_not_invoke_libvpx() {
+        let config = vp9_encoder_config(ImageFormat::I420);
+        let (y, u, v) = black_i420(config.width, config.height);
+        let mut encoder = Encoder::new(config).expect("failed to create");
+
+        let before_bitrate = encoder.cfg_target_bitrate_kbps();
+        let before_timebase = encoder.cfg_timebase();
+        let before_min = encoder.cfg_min_quantizer();
+        let before_max = encoder.cfg_max_quantizer();
+        let before_kf = encoder.cfg_kf_max_dist();
+
+        encoder
+            .reconfigure(&ReconfigureParams::default())
+            .expect("all-None reconfigure must succeed");
+
+        assert_eq!(encoder.cfg_target_bitrate_kbps(), before_bitrate);
+        assert_eq!(encoder.cfg_timebase(), before_timebase);
+        assert_eq!(encoder.cfg_min_quantizer(), before_min);
+        assert_eq!(encoder.cfg_max_quantizer(), before_max);
+        assert_eq!(encoder.cfg_kf_max_dist(), before_kf);
+
+        encode_i420(&mut encoder, &y, &u, &v);
+        drain_frames(&mut encoder);
+    }
+
+    /// `Encoder::new` の入力検査厳格化を網羅する
+    #[test]
+    fn encoder_new_rejects_invalid_params() {
+        type Mutate = fn(&mut EncoderConfig);
+        let cases: Vec<(&'static str, Mutate, &'static str)> = vec![
+            (
+                "target_bitrate=999",
+                |c| c.target_bitrate = 999,
+                "target_bitrate must be at least 1000 bps (libvpx kbps resolution)",
+            ),
+            (
+                "target_bitrate=1_000_000_001",
+                |c| c.target_bitrate = 1_000_000_001,
+                "target_bitrate exceeds libvpx maximum (1_000_000_000 bps)",
+            ),
+            (
+                "width=usize::MAX",
+                |c| c.width = usize::MAX,
+                "width is out of range",
+            ),
+            (
+                "height=usize::MAX",
+                |c| c.height = usize::MAX,
+                "height is out of range",
+            ),
+            (
+                "fps_denominator=0",
+                |c| c.fps_denominator = 0,
+                "fps_denominator must be non-zero",
+            ),
+            (
+                "fps_numerator=0",
+                |c| c.fps_numerator = 0,
+                "fps_numerator must be non-zero",
+            ),
+            (
+                "min > max",
+                |c| {
+                    c.min_quantizer = 50;
+                    c.max_quantizer = 10;
+                },
+                "min_quantizer must not exceed max_quantizer",
+            ),
+            (
+                "max_quantizer=64",
+                |c| c.max_quantizer = 64,
+                "max_quantizer must not exceed 63",
+            ),
+            (
+                "cq_level=64",
+                |c| c.cq_level = 64,
+                "cq_level must not exceed 63",
+            ),
+        ];
+
+        for (case_id, mutate, expected_reason) in cases {
+            let mut config = vp9_encoder_config(ImageFormat::I420);
+            mutate(&mut config);
+            let err = Encoder::new(config)
+                .err()
+                .unwrap_or_else(|| panic!("case [{case_id}]: Encoder::new must fail"));
+            assert_eq!(
+                err.reason(),
+                Some(expected_reason),
+                "case [{case_id}]: expected reason mismatch",
+            );
+        }
+    }
+
     fn vp8_encoder_config(image_format: ImageFormat) -> EncoderConfig {
         let mut config = EncoderConfig::new(
             128,
@@ -1648,9 +2530,15 @@ mod tests {
     }
 
     #[test]
-    fn error_reason() {
+    fn error_reason_falls_back_to_libvpx_string() {
         let e = Error::check(sys::vpx_codec_err_t_VPX_CODEC_MEM_ERROR, "test", None)
             .expect_err("not an error");
-        assert!(e.reason().is_some());
+        // `Error::reason()` は明示 `reason` がない場合 libvpx の vpx_codec_err_to_string()
+        // を経由して英文メッセージを返す
+        let reason = e.reason().expect("reason must be available");
+        assert!(
+            !reason.is_empty(),
+            "libvpx must return a non-empty error string for MEM_ERROR"
+        );
     }
 }
