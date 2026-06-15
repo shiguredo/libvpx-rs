@@ -13,14 +13,15 @@ include = ["/LICENSE", "/README.md", "/build.rs", "/src/**/*"]
 
 # 以降は外部ライブラリビルド用のメタデータ
 # (この内容は build.rs の中からのみ参照される)
-[package.metadata.external-dependencies]
-libvpx = { url = "https://github.com/webmproject/libvpx", version = "v1.16.0" }
+[package.metadata.external-dependencies.libvpx]
+url = "https://github.com/webmproject/libvpx"
+version = "v1.16.0"
 
 [dependencies]
 
 [build-dependencies]
 bindgen = "0.72"
-shiguredo_toml = "2026.1"
+shiguredo_toml = "2026.2"
 
 [features]
 source-build = []
