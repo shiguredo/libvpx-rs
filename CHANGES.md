@@ -11,6 +11,8 @@
 
 ## develop
 
+- [CHANGE] MSRV (`rust-version`) を 1.93 に引き上げる
+  - @voluntas
 - [ADD] `Encoder::reconfigure` と `ReconfigureParams` を追加する
   - ビットレート・FPS・量子化レンジ・キーフレーム間隔をエンコード中に変更できる
   - `target_bitrate` は 1000 bps 以上 1_000_000_000 bps 以下、`fps_numerator` / `fps_denominator` は両方同時指定かつ非ゼロで 1_000_000_000 以下、`min_quantizer <= max_quantizer <= 63` (libvpx の制限による) を要求する
@@ -22,6 +24,12 @@
   - `target_bitrate < 1000 bps` (旧実装は libvpx に素通し) と `target_bitrate > 1_000_000_000 bps` (旧実装は libvpx 側で silent clip) をいずれも `VPX_CODEC_INVALID_PARAM` で拒否する
   - `min_quantizer > max_quantizer`、`max_quantizer > 63`、`cq_level > 63` を `Encoder::new` の時点で拒否する (旧実装は libvpx 内部任せ。63 は libvpx の制限による)
   - エラー詳細文言が libvpx 由来からラッパー由来 (`shiguredo_libvpx::Encoder::new`) に変わる
+  - @voluntas
+
+### misc
+
+- [UPDATE] `prek.toml` を shiguredo-rust 規約に合わせて整備する
+  - builtin フックの拡充、tombi lint/format の追加、`cargo test` を `pre-push` 専用にする
   - @voluntas
 
 ## 2026.1.0
