@@ -704,7 +704,7 @@ fn detect_linux_distro() -> String {
             if let Some(version) = line.strip_prefix("VERSION_ID=") {
                 let version = version.trim_matches('"');
                 match version {
-                    "22.04" | "24.04" => return format!("ubuntu-{}", version),
+                    "22.04" | "24.04" | "26.04" => return format!("ubuntu-{}", version),
                     _ => {}
                 }
             }
