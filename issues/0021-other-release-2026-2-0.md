@@ -1,7 +1,7 @@
 # 2026.2.0 を正式リリースする
 
 - Created: 2026-08-06
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-07
 - Branch: release/2026.2.0
 - Polished: {YYYY-MM-DD}
 
@@ -31,3 +31,7 @@ release/2026.2.0 ブランチで以下の手順を実施する (詳細は RELEAS
 - GitHub Releases の 2026.2.0 に全プラットフォームの prebuilt アーカイブと SHA256 がアップロードされている
 - タグ 2026.2.0 の crates.io パッケージで `cargo build` (source-build なし) が通る
 - develop にリリース内容がマージされている
+
+## 解決方法
+
+却下する。正式リリースを実施するための issue であり、リリース用の issue は不要とする方針に従う。
