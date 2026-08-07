@@ -3,7 +3,7 @@
 - Created: 2026-08-06
 - Completed: {YYYY-MM-DD}
 - Branch: feature/fix-vp9-profile2-init-failure
-- Polished: {YYYY-MM-DD}
+- Polished: 2026-08-07
 
 ## 目的
 
@@ -11,19 +11,26 @@
 
 ## 現状
 
-`Vp9Profile::Profile2` (`src/lib.rs`) は `Encoder::init` が `g_profile` に 2 を設定するのみで、`g_bit_depth` を設定しない。libvpx の `validate_config` (vp9_cx_iface.c) は「`g_profile > PROFILE_1 && g_bit_depth == VPX_BITS_8` なら ERROR」を返すため、`Vp9Profile::Profile2` を指定した `Encoder::new` は **常に** 失敗する (実測済み。`vpx_codec_enc_init_ver` が "Invalid parameter" を返す)。
+`Encoder::init` (`src/lib.rs`) は `Vp9Profile::Profile2` に対して `g_profile` に 2 を設定するのみで、`g_bit_depth` / `g_input_bit_depth` を設定しない。`vpx_codec_enc_config_default` は `g_bit_depth = VPX_BITS_8` を既定値として設定する (vp9_cx_iface.c の cfg map) ため、libvpx の `validate_config` (vp9_cx_iface.c) の「`g_profile > PROFILE_1 && g_bit_depth == VPX_BITS_8` なら ERROR」の検査に抵触し、`Vp9Profile::Profile2` を指定した `Encoder::new` は常に失敗する (実測済み。`vpx_codec_enc_init_ver` が "Invalid parameter" を返す)。
 
-一方 `supported_codecs()` (`src/codec_info.rs`) は VP9 のエンコードプロファイルとして Profile0 と Profile2 を「利用可能」と報告する。`README.md` の「VP9 High Bitdepth (10-bit / Profile 2) デコード対応」も、エンコード側 (Profile2) とデコード側 (10-bit ストリーム) の両方が未検証のまま宣伝されている。
+一方 `supported_codecs()` (`src/codec_info.rs`) は VP9 のエンコードプロファイルとして Profile0 と Profile2 を「利用可能」と報告する。`README.md` の `Vp9Profile` の設定一覧 (`README.md` の `| Profile2 | 10/12-bit 4:2:0 |`) も Profile2 を列挙している。
 
 ## 設計方針
 
-以下のいずれか。
+本 issue では `Vp9Profile::Profile2` を真に動作させる試みは行わず、公開情報を実挙動に合わせる。真の 10/12-bit 対応 (bit depth 設定の公開 API 設計) は別 issue で扱う (Profile2 の真の対応は issue 0022 の範疇)。
 
-1. `g_bit_depth` / `g_input_bit_depth` / `VPX_CODEC_USE_HIGHBITDEPTH` の設定を実装して Profile2 を真に動作させる
-2. 1 を実施するまでの間、`Vp9Profile::Profile2` と `supported_codecs()` の報告を実挙動に合わせる (Profile2 を利用可能と報告しない)
+- `supported_codecs()` の VP9 エンコードプロファイル報告から Profile2 を除外し、実際に動作する Profile0 のみを報告する
+- `Vp9Profile::Profile2` の variant は残す (公開 API の破壊的変更を避ける)。doc コメントに「現状は使用不能 (init が失敗する)。bit depth 設定 API 未実装のため」と明記する
+- `Vp9EncodingProfile::Profile2` (`src/codec_info.rs`) の variant も残すが、`supported_codecs()` が報告しなくなるため、doc コメントを「現状は利用不可 (bit depth 設定 API 未実装のため。issue 0022 の実装後に再報告される)」と明記する
+- `Encoder::new` が `Vp9Profile::Profile2` に対して Err を返すことをテストで固定する。`Encoder::init` で `Vp9Profile::Profile2` を事前検査し、libvpx 側の `validate_config` に到達する前に `invalid_param` ヘルパーで明示的な reason (bit depth 設定 API 未実装の旨) を返す (libvpx 由来の "Invalid parameter" では原因が伝わらないため、issue 0006 と同じくラッパー側で明示文言を返す)
+- `README.md` の `Vp9Profile` 設定一覧の Profile2 行を実挙動に合わせて修正する (エンコードは Profile0 のみ対応の旨)
+
+なお issue 0006 は「`ImageFormat::I42016` を指定した `Encoder::new` を `VPX_CODEC_INVALID_PARAM` で拒否する」設計であり、本 issue の方針 (Profile2 を利用不可扱いにする) と整合する。0006 の I42016 拒否の解除所掌は issue 0022 が持つ。
 
 ## 完了条件
 
-- `Vp9Profile::Profile2` を指定した `Encoder::new` の挙動と `supported_codecs()` の報告が一致している
-- Profile2 を「利用可能」と報告する場合: 10-bit ラウンドトリップテスト (エンコード → デコード → `DecodedFrame::is_high_depth()` が true) が追加され、実際に動作することが検証されている
-- Profile2 を利用不可とする場合: テストで `Encoder::new` が Err を返すこと、`supported_codecs()` が Profile2 を含まないことが検証されている
+- `supported_codecs()` が VP9 のエンコードプロファイルとして Profile0 のみを報告する
+- `Vp9Profile::Profile2` を指定した `Encoder::new` に関するテストが存在し、Err を返すことが検証されている (エラーが `VPX_CODEC_INVALID_PARAM` であること、reason 文言に「bit depth 設定 API 未実装」の旨が含まれることを `Error::reason()` で検証する)
+- `Vp9Profile::Profile2` / `Vp9EncodingProfile::Profile2` の doc コメントが実挙動と一致している
+- `README.md` の `Vp9Profile` 設定一覧が実挙動と一致している
+- `CHANGES.md` に [FIX] として記載される
