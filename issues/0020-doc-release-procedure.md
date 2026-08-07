@@ -1,7 +1,7 @@
 # 正式リリース手順を文書化する (RELEASE.md)
 
 - Created: 2026-08-06
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-08-07
 - Branch: feature/update-release-procedure
 - Polished: {YYYY-MM-DD}
 
@@ -25,3 +25,7 @@ canary リリースと正式リリースの手順をリポジトリに文書化�
 
 - RELEASE.md がリポジトリに存在し、canary リリースと正式リリースの手順が記載されている
 - 手順に従えばタグ名と Cargo.toml バージョンの不一致が発生しない
+
+## 解決方法
+
+却下する。canary リリース・正式リリースという概念を勝手に作り出しており、リリース手順の文書化 (RELEASE.md) は不要と判断する。リリース用の issue はすべて不要とする方針に従う。
