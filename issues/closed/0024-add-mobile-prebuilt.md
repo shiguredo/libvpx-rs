@@ -1,0 +1,71 @@
+# iOS / Android 向け prebuilt を追加する
+
+- Created: 2026-10-03
+- Completed: 2026-10-03
+- Branch: feature/update-libvpx-mobile-prebuilt
+- Polished: {YYYY-MM-DD}
+
+## 目的
+
+iOS / Android アプリから libvpx-rs を利用するときに、ソースビルドを要求せず prebuilt のダウンロードで使えるようにする。aom-rs / opus-rs と同じくモバイル向け prebuilt を配布する。
+
+## 現状
+
+- `build.rs` の `get_target_platform()` は Linux / macOS / Windows のみ対応し、iOS / Android では `unsupported target` で panic する
+- `build_from_source_unix()` はターゲット共通の configure 呼び出しのみで、iOS / Android のクロスコンパイルに対応していない
+- `.github/workflows/release.yml` はデスクトップ向け prebuilt のみ配布する
+- libvpx は arm64 シミュレーター (`arm64-iphonesimulator-gcc`) を公式サポートしない
+  - `configure` の `all_platforms` に存在せず `--target=arm64-iphonesimulator-gcc` は `Unrecognized toolchain` で失敗する
+  - 公式の `build/make/iosbuild.sh` も実機 arm64 (`arm64-darwin-gcc`) と x86_64 シミュレーター (`x86_64-iphonesimulator-gcc`) のみを対象にしている
+  - configure の解析ロジック自体は arm64 シミュレーターを構造的に処理できるため、パッチで対応する
+
+## 設計方針
+
+追加する prebuilt とビルド方法の対応は次のとおり。
+
+| prebuilt | Rust ターゲット | configure ターゲット | 備考 |
+|---|---|---|---|
+| `ios_arm64` | `aarch64-apple-ios` | `arm64-darwin-gcc` | configure が iphoneos SDK の clang を自動選択する |
+| `ios-sim_arm64` | `aarch64-apple-ios-sim` | `arm64-iphonesimulator-gcc` | 下記パッチを適用する |
+| `android_arm64` | `aarch64-linux-android` | `arm64-android-gcc` | NDK の clang ラッパーを指定する |
+| `android_x86_64` | `x86_64-linux-android` | `x86_64-android-gcc` | NDK の clang ラッパーと NASM が必要 |
+
+- libvpx の `git clone` 後に、arm64 シミュレーター向けのときだけ `build.rs` が次のパッチを当てる
+  - `configure` の `all_platforms` に `arm64-iphonesimulator-gcc` を追加する
+  - `build/make/configure.sh` の `*-iphonesimulator-*` で、arm64 のときだけ `-miphoneos-version-min` ではなく `-arch arm64 -mios-simulator-version-min=14.0` を使う (`-miphoneos-version-min` のままだと clang が実機 iOS と誤判定し、configure のリンク検査と生成物のプラットフォームが壊れる)
+  - 置換対象が見つからない場合は panic し、upstream の変更を検知する。upstream が対応したらパッチを削除する
+- Android は `ANDROID_NDK_HOME` の NDK ツールチェーンを使う
+  - `CC` / `CXX` / `AR` / `LD` に NDK のツールチェーンを指定する
+  - arm64 はアセンブリをビルドしないため `AS` は設定しない。x86_64 は configure に NASM を自動検出させ、NASM のアラインメント検査が使う `readelf` のシム (NDK の `llvm-readelf` を呼び出す) を PATH に追加する
+  - API level は `ANDROID_PLATFORM` (未指定時 21、数値または `android-<数値>`)
+  - ホストは x86_64 Linux と macOS に対応する (Windows ホストと Linux arm64 ホストは NDK の制約により非対応とし、明示的に拒否する)
+- bindgen にはターゲットに合わせた clang 引数 (`--target` と `--sysroot` / `-isysroot`) を渡す
+- iOS 実機は libvpx の既定の最小バージョン (7.0) でビルドする
+  - 13.0 以上を指定すると clang が `___chkstk_darwin` を参照するが、このシンボルは iOS 13 以降の libSystem にしか公開されない。Rust の `aarch64-apple-ios` は iOS 10.0 向けにリンクするため未定義シンボルでリンクに失敗する
+  - 7.0 では clang がインラインのスタックプローブを生成するため外部シンボルに依存しない
+- arm64 シミュレーターは 14.0 固定 (Rust の `aarch64-apple-ios-sim` の下限)
+- CI と Release は aom-rs / opus-rs と同じく `.github/workflows/mobile.yml` を共用する
+  - CI は source-build で `cargo test --lib --no-run` まで実行し、静的ライブラリのリンクを検証する
+  - Release はアップロード後に prebuilt をダウンロードして再リンク検証する
+- prebuilt アーカイブには `lib/libvpx.a`、`bindings.rs`、`LICENSE`、`PATENTS` を同梱する
+
+## 完了条件
+
+- 4 ターゲットの prebuilt が GitHub Release にアップロードされる
+- Release ワークフローで prebuilt をダウンロードし、各ターゲットでリンクできることを検証する (PR の CI は source-build でリンクを検証する)
+- `README.md` にモバイルの動作要件とソースビルド手順を記載する
+
+## 解決方法
+
+`build.rs` にモバイル 4 ターゲット (`ios_arm64` / `ios-sim_arm64` / `android_arm64` / `android_x86_64`) のソースビルドと prebuilt 選択を追加し、`.github/workflows/mobile.yml` を CI と Release から呼び出すようにした。
+
+- iOS 実機は `--target=arm64-darwin-gcc` で configure が iphoneos SDK を自動選択する。最小バージョンは libvpx 既定の 7.0 のまま使う (13.0 以上では `___chkstk_darwin` が未定義になるため)
+- arm64 シミュレーターは configure と build/make/configure.sh にパッチを当てて `arm64-iphonesimulator-gcc` を利用する。置換対象がちょうど 1 箇所であることを検証し、見つからない場合は panic して upstream の変更を検知する
+- Android は NDK の clang ラッパーを `CC` / `CXX` / `AR` / `LD` に指定し、`--enable-pic` を有効にする。x86_64 は NASM と `llvm-readelf` を呼ぶ readelf シムを使う
+- ホストは x86_64 Linux と macOS に対応し、Windows ホストと Linux arm64 ホストは明示的に拒否する
+- bindgen には `--target` と `--sysroot` / `-isysroot` を渡す
+- prebuilt アーカイブには `lib/libvpx.a`、`bindings.rs`、`LICENSE`、`PATENTS` を含め、SHA256 チェックサムを添付する
+- ローカルで 4 ターゲットのソースビルドとリンクを確認し、GitHub Actions の mobile ジョブでも 4 ターゲットすべて成功した
+- `README.md` にモバイルの動作要件、prebuilt の対応表、ソースビルド手順を追記した
+
+モバイル prebuilt のアップロードと prebuilt を使った再リンク検証は、次回リリースで初めて実行される。

@@ -91,6 +91,13 @@ jobs:
           LIBCLANG_PATH: /mingw64/bin
         run: cargo test --target x86_64-pc-windows-gnu --features source-build
 
+  # iOS / Android 向け prebuilt のビルドとリンク検証
+  mobile:
+    name: Mobile prebuilt
+    permissions:
+      contents: read
+    uses: ./.github/workflows/mobile.yml
+
   # docs.rs 向けビルド確認
   docs-rs:
     name: docs.rs
@@ -108,6 +115,7 @@ jobs:
       - fmt-clippy
       - test
       - test-windows
+      - mobile
       - docs-rs
     runs-on: ubuntu-slim
     timeout-minutes: 5

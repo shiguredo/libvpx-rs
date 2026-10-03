@@ -25,6 +25,8 @@ fn main() {
     println!("cargo::rerun-if-changed=build.rs");
     println!("cargo::rerun-if-env-changed=CARGO_FEATURE_SOURCE_BUILD");
     println!("cargo::rerun-if-env-changed=LIBVPX_TARGET");
+    println!("cargo::rerun-if-env-changed=ANDROID_NDK_HOME");
+    println!("cargo::rerun-if-env-changed=ANDROID_PLATFORM");
 
     // 各種変数やビルドディレクトリのセットアップ
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("infallible"));
@@ -243,6 +245,9 @@ fn build_from_source(out_dir: &Path, output_bindings_path: &Path) -> PathBuf {
     // 依存ライブラリのリポジトリを取得する
     git_clone_external_lib(&out_build_dir);
 
+    // arm64 シミュレーター向けのときは libvpx 本体にパッチを当てる
+    apply_libvpx_patches(&src_dir);
+
     // ソースからビルドする
     build_from_source_platform(&src_dir);
 
@@ -259,6 +264,7 @@ fn build_from_source(out_dir: &Path, output_bindings_path: &Path) -> PathBuf {
         .header(input_header_dir.join("vpx_codec.h").display().to_string())
         .header(input_header_dir.join("vpx_decoder.h").display().to_string())
         .header(input_header_dir.join("vpx_encoder.h").display().to_string())
+        .clang_args(get_bindgen_clang_args())
         .parse_callbacks(Box::new(callbacks))
         .generate()
         .expect("failed to generate bindings")
@@ -279,11 +285,25 @@ fn build_from_source_platform(src_dir: &Path) {
 }
 
 // Unix 環境でのソースビルド
+//
+// iOS / Android のクロスコンパイルでは configure に専用のターゲットと
+// ツールチェーンを渡す。デスクトップ向けでは従来どおりの configure 呼び出しになる。
 fn build_from_source_unix(src_dir: &Path) {
-    let success = Command::new("./configure")
+    let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    let mobile_config = get_mobile_source_build_config(&target_os);
+
+    let mut configure = Command::new("./configure");
+    configure
         .arg("--disable-shared")
         .arg("--enable-vp9-highbitdepth")
-        .arg(format!("--prefix={}", src_dir.display()))
+        .arg(format!("--prefix={}", src_dir.display()));
+    for arg in &mobile_config.configure_args {
+        configure.arg(arg);
+    }
+    for (key, value) in &mobile_config.envs {
+        configure.env(key, value);
+    }
+    let success = configure
         .current_dir(src_dir)
         .status()
         .is_ok_and(|status| status.success());
@@ -307,6 +327,352 @@ fn build_from_source_unix(src_dir: &Path) {
     if !success {
         panic!("[make install] failed to build {LIB_NAME}");
     }
+}
+
+/// モバイル向けソースビルドの configure 引数と環境変数を保持する
+struct MobileSourceBuildConfig {
+    /// configure に追加する引数
+    configure_args: Vec<String>,
+    /// configure に渡す環境変数 (CC / CXX / AR / LD と x86_64 の PATH)
+    envs: Vec<(String, String)>,
+}
+
+/// ターゲットに応じたモバイル向けソースビルド設定を返す
+///
+/// デスクトップ向けでは空の設定を返し、従来の configure 呼び出しをそのまま使う。
+fn get_mobile_source_build_config(target_os: &str) -> MobileSourceBuildConfig {
+    match target_os {
+        "ios" => get_ios_source_build_config(),
+        "android" => get_android_source_build_config(),
+        _ => MobileSourceBuildConfig {
+            configure_args: Vec::new(),
+            envs: Vec::new(),
+        },
+    }
+}
+
+/// iOS 向けソースビルド設定を返す
+fn get_ios_source_build_config() -> MobileSourceBuildConfig {
+    // iOS のクロスビルドには Xcode (xcrun) が必要なため、macOS ホスト以外は拒否する。
+    // 非 macOS ホストでは configure が成功したように見えて libvpx.a が生成されず、
+    // 後続のシンボル書き換えで分かりにくいエラーになる
+    if env::consts::OS != "macos" {
+        panic!("iOS source-build requires a macOS host with Xcode");
+    }
+
+    let rust_target = env::var("TARGET").expect("TARGET is not set");
+    let mut configure_args = match rust_target.as_str() {
+        // iOS 実機。configure が iphoneos SDK の clang を自動選択する。
+        // 最小バージョンは libvpx の既定 (7.0) のまま使う。13.0 以上を指定すると
+        // clang が ___chkstk_darwin を参照するようになるが、このシンボルは
+        // iOS 13 以降の libSystem にしか公開されず、Rust の aarch64-apple-ios は
+        // iOS 10.0 向けにリンクするため未定義になる
+        "aarch64-apple-ios" => vec!["--target=arm64-darwin-gcc".to_string()],
+        // iOS arm64 シミュレーター。apply_libvpx_patches() で
+        // arm64-iphonesimulator-gcc を利用可能にしてから configure する
+        "aarch64-apple-ios-sim" => vec!["--target=arm64-iphonesimulator-gcc".to_string()],
+        _ => panic!("unsupported iOS target for source-build: {rust_target}"),
+    };
+
+    // 静的ライブラリのみ必要なため、実行ファイル (examples / tools) と
+    // テストはビルドしない
+    configure_args.extend(disable_extra_build_targets());
+
+    MobileSourceBuildConfig {
+        configure_args,
+        envs: Vec::new(),
+    }
+}
+
+/// Android 向けソースビルド設定を返す
+fn get_android_source_build_config() -> MobileSourceBuildConfig {
+    let rust_target = env::var("TARGET").expect("TARGET is not set");
+    let (clang_target, configure_target) = match rust_target.as_str() {
+        "aarch64-linux-android" => ("aarch64-linux-android", "arm64-android-gcc"),
+        "x86_64-linux-android" => ("x86_64-linux-android", "x86_64-android-gcc"),
+        _ => panic!("unsupported Android target for source-build: {rust_target}"),
+    };
+
+    let api_level = get_android_api_level();
+    let toolchain_bin = android_toolchain_bin_dir();
+    let clang = toolchain_bin.join(format!("{clang_target}{api_level}-clang"));
+    let clangxx = toolchain_bin.join(format!("{clang_target}{api_level}-clang++"));
+    let llvm_ar = toolchain_bin.join(exe_name("llvm-ar"));
+    for path in [&clang, &clangxx, &llvm_ar] {
+        if !path.exists() {
+            panic!("Android NDK tool not found: {}", path.display());
+        }
+    }
+
+    let mut configure_args = vec![
+        format!("--target={configure_target}"),
+        // Android アプリの共有ライブラリに静的にリンクするため PIC を有効にする。
+        // CONFIG_PIC が vpx_config.asm 経由で NASM の PIC マクロにも伝わる
+        "--enable-pic".to_string(),
+    ];
+    configure_args.extend(disable_extra_build_targets());
+
+    let mut envs = vec![
+        ("CC".to_string(), clang.display().to_string()),
+        ("CXX".to_string(), clangxx.display().to_string()),
+        ("AR".to_string(), llvm_ar.display().to_string()),
+        ("LD".to_string(), clang.display().to_string()),
+    ];
+    if rust_target == "x86_64-linux-android" {
+        // x86_64 の NASM アラインメント検査は readelf を使う。
+        // macOS には readelf がないため、NDK の llvm-readelf を呼ぶシムを
+        // PATH に追加する。arm64 はアセンブリをビルドしないため不要
+        envs.push(create_readelf_shim_env(&toolchain_bin));
+    }
+
+    MobileSourceBuildConfig {
+        configure_args,
+        envs,
+    }
+}
+
+/// readelf シムを PATH に追加する環境変数を返す
+///
+/// configure の NASM アラインメント検査 (`check_asm_align`) は `readelf` を
+/// 呼び出すが、macOS には readelf が存在しない。NDK が持つ `llvm-readelf` を
+/// 呼び出すシムを OUT_DIR に作成し、PATH の先頭に追加する。
+fn create_readelf_shim_env(toolchain_bin: &Path) -> (String, String) {
+    let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("OUT_DIR is not set"));
+    let shim_dir = out_dir.join("ndk-bin-shims");
+    fs::create_dir_all(&shim_dir).expect("failed to create shim directory");
+
+    let llvm_readelf = toolchain_bin.join("llvm-readelf");
+    if !llvm_readelf.exists() {
+        panic!("Android NDK tool not found: {}", llvm_readelf.display());
+    }
+
+    let shim_path = shim_dir.join("readelf");
+    fs::write(
+        &shim_path,
+        format!("#!/bin/sh\nexec \"{}\" \"$@\"\n", llvm_readelf.display()),
+    )
+    .expect("failed to write readelf shim");
+
+    // 実行権限を付与する (Windows ホストは android_toolchain_bin_dir で拒否するが、
+    // Windows 向けのコンパイルでも通るように cfg を付ける)
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = fs::metadata(&shim_path)
+            .expect("failed to read shim metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&shim_path, permissions).expect("failed to set shim permissions");
+    }
+
+    let path = env::var("PATH").unwrap_or_default();
+    (
+        "PATH".to_string(),
+        format!("{}:{}", shim_dir.display(), path),
+    )
+}
+
+/// 静的ライブラリ以外のビルド対象を無効化する configure 引数を返す
+fn disable_extra_build_targets() -> Vec<String> {
+    [
+        "--disable-examples",
+        "--disable-tools",
+        "--disable-docs",
+        "--disable-unit-tests",
+    ]
+    .iter()
+    .map(|arg| arg.to_string())
+    .collect()
+}
+
+/// ANDROID_PLATFORM から API level を取得する
+///
+/// 値は数値または `android-<数値>` 形式で指定でき、未指定時は 21 とする。
+/// NDK が下限未満の API level を引き上げて bindgen と食い違うため、
+/// 21 未満は拒否する。
+fn get_android_api_level() -> u32 {
+    let platform = env::var("ANDROID_PLATFORM").unwrap_or_else(|_| "21".to_string());
+    let api_level = platform
+        .strip_prefix("android-")
+        .unwrap_or(&platform)
+        .parse::<u32>()
+        .expect("ANDROID_PLATFORM must be a numeric API level or android-<API level>");
+    assert!(
+        api_level >= 21,
+        "ANDROID_PLATFORM must be at least API level 21"
+    );
+    api_level
+}
+
+/// Android NDK のホスト用ツールチェーン bin ディレクトリを返す
+fn android_toolchain_bin_dir() -> PathBuf {
+    let ndk = PathBuf::from(
+        env::var_os("ANDROID_NDK_HOME")
+            .expect("ANDROID_NDK_HOME is not set. Set it to the Android NDK directory"),
+    );
+    // libvpx の configure は CC などのパスをクォートせずに実行するため、
+    // スペースを含むパスは早期に拒否する
+    if ndk.to_string_lossy().contains(' ') {
+        panic!(
+            "ANDROID_NDK_HOME must not contain spaces: {}",
+            ndk.display()
+        );
+    }
+
+    // NDK が提供するホスト別のツールチェーンを使う。
+    // Linux arm64 と Windows には NDK のツールチェーンが存在しない
+    let host_tag = match (env::consts::OS, env::consts::ARCH) {
+        ("linux", "x86_64") => "linux-x86_64",
+        // macOS は x86_64 / arm64 とも darwin-x86_64 (fat バイナリ)
+        ("macos", _) => "darwin-x86_64",
+        (os, arch) => panic!(
+            "Android NDK does not provide a toolchain for {os} {arch}. \
+             Use an x86_64 Linux host or macOS"
+        ),
+    };
+    ndk.join("toolchains/llvm/prebuilt")
+        .join(host_tag)
+        .join("bin")
+}
+
+// --- libvpx 本体へのパッチ ---
+//
+// libvpx は arm64 シミュレーター (arm64-iphonesimulator-gcc) を公式サポートしていない。
+// 次の 2 点を最小限パッチして利用可能にする。
+//
+//   1. configure のプラットフォーム一覧に arm64-iphonesimulator-gcc を追加する
+//   2. build/make/configure.sh で arm64 のときだけ -mios-simulator-version-min を使う
+//
+// 2 が必要な理由: iphonesimulator 向けの共通設定は -miphoneos-version-min を
+// 使っているが、arm64 でこのフラグと -isysroot <iphonesimulator> を組み合わせると
+// clang が実機 iOS 向けと誤判定し、configure のリンク検査と生成物の
+// プラットフォームが壊れる。arm64 シミュレーターの最小バージョンは 14.0 のため、
+// -mios-simulator-version-min=14.0 と -arch arm64 を明示する。
+//
+// 置換対象が見つからない場合は upstream の変更を検知するため panic する。
+// upstream が arm64 シミュレーターに対応したらこの処理は削除する。
+
+/// arm64 シミュレーター向けに libvpx 本体へパッチを適用する
+///
+/// iOS 実機や Android、デスクトップ向けでは何もしない。
+fn apply_libvpx_patches(src_dir: &Path) {
+    let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    let rust_target = env::var("TARGET").unwrap_or_default();
+    if target_os != "ios" || rust_target != "aarch64-apple-ios-sim" {
+        return;
+    }
+
+    // configure のプラットフォーム一覧に arm64-iphonesimulator-gcc を追加する
+    let configure_path = src_dir.join("configure");
+    let configure = fs::read_to_string(&configure_path).expect("failed to read libvpx configure");
+    let configure = replace_once(
+        "configure",
+        &configure,
+        "all_platforms=\"${all_platforms} x86_64-iphonesimulator-gcc\"",
+        concat!(
+            "all_platforms=\"${all_platforms} x86_64-iphonesimulator-gcc\"\n",
+            "all_platforms=\"${all_platforms} arm64-iphonesimulator-gcc\"",
+        ),
+    );
+    fs::write(&configure_path, configure).expect("failed to write libvpx configure");
+
+    // arm64 向けの最小バージョン指定を -mios-simulator-version-min に切り替える
+    let configure_sh_path = src_dir.join("build/make/configure.sh");
+    let configure_sh =
+        fs::read_to_string(&configure_sh_path).expect("failed to read libvpx configure.sh");
+    let configure_sh = replace_once(
+        "build/make/configure.sh",
+        &configure_sh,
+        concat!(
+            "    *-iphonesimulator-*)\n",
+            "      add_cflags  \"-miphoneos-version-min=${IOS_VERSION_MIN}\"\n",
+            "      add_ldflags \"-miphoneos-version-min=${IOS_VERSION_MIN}\"",
+        ),
+        concat!(
+            "    *-iphonesimulator-*)\n",
+            "      if [ \"${tgt_isa}\" = \"arm64\" ]; then\n",
+            "        # arm64 は -miphoneos-version-min だと実機 iOS 向けと誤判定されるため\n",
+            "        # シミュレーター向けの最小バージョンとアーキテクチャを明示する\n",
+            "        add_cflags  \"-arch arm64 -mios-simulator-version-min=14.0\"\n",
+            "        add_ldflags \"-arch arm64 -mios-simulator-version-min=14.0\"\n",
+            "      else\n",
+            "        add_cflags  \"-miphoneos-version-min=${IOS_VERSION_MIN}\"\n",
+            "        add_ldflags \"-miphoneos-version-min=${IOS_VERSION_MIN}\"\n",
+            "      fi",
+        ),
+    );
+    fs::write(&configure_sh_path, configure_sh).expect("failed to write libvpx configure.sh");
+}
+
+/// 文字列を 1 箇所だけ置換する
+///
+/// 置換対象がちょうど 1 箇所でない場合は upstream の変更を検知するため panic する。
+fn replace_once(file: &str, content: &str, from: &str, to: &str) -> String {
+    let count = content.matches(from).count();
+    if count != 1 {
+        panic!(
+            "expected exactly one occurrence of the patch target in {file}, found {count}: {from:?}"
+        );
+    }
+    content.replacen(from, to, 1)
+}
+
+/// bindgen に渡す clang 引数をターゲットに応じて返す
+///
+/// iOS / Android ではホストとターゲットのプラットフォームが異なるため、
+/// ターゲット triple と SDK / sysroot を明示する必要がある。
+fn get_bindgen_clang_args() -> Vec<String> {
+    let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    let rust_target = env::var("TARGET").expect("TARGET is not set");
+    match target_os.as_str() {
+        "ios" => {
+            let (sdk, arch, simulator_suffix, deployment_target) = match rust_target.as_str() {
+                // iOS 実機の最小バージョンは libvpx の既定 (7.0) に合わせる
+                "aarch64-apple-ios" => ("iphoneos", "arm64", "", "7.0".to_string()),
+                // arm64 シミュレーターは 14.0 固定 (Rust ターゲットの下限)
+                "aarch64-apple-ios-sim" => {
+                    ("iphonesimulator", "arm64", "-simulator", "14.0".to_string())
+                }
+                _ => panic!("unsupported iOS target for bindgen: {rust_target}"),
+            };
+            let sdk_path = get_ios_sdk_path(sdk);
+            vec![
+                format!("--target={arch}-apple-ios{deployment_target}{simulator_suffix}"),
+                "-isysroot".to_string(),
+                sdk_path,
+            ]
+        }
+        "android" => {
+            let clang_target = match rust_target.as_str() {
+                "aarch64-linux-android" => "aarch64-linux-android",
+                "x86_64-linux-android" => "x86_64-linux-android",
+                _ => panic!("unsupported Android target for bindgen: {rust_target}"),
+            };
+            let api_level = get_android_api_level();
+            // NDK ツールチェーンの sysroot は bin の隣にある
+            let sysroot = android_toolchain_bin_dir().join("../sysroot");
+            vec![
+                format!("--target={clang_target}{api_level}"),
+                format!("--sysroot={}", sysroot.display()),
+            ]
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// xcrun で iOS SDK のパスを取得する
+fn get_ios_sdk_path(sdk: &str) -> String {
+    let output = Command::new("xcrun")
+        .args(["--sdk", sdk, "--show-sdk-path"])
+        .output()
+        .expect("failed to run xcrun. Ensure Xcode is installed");
+    if !output.status.success() {
+        panic!("failed to find iOS SDK: {sdk}");
+    }
+    String::from_utf8(output.stdout)
+        .expect("invalid iOS SDK path")
+        .trim()
+        .to_string()
 }
 
 // Windows + MSYS2 環境でのソースビルド
@@ -352,13 +718,13 @@ fn run_with_shell(src_dir: &Path, command: &str, step_name: &str) {
 // rust-toolchain.toml に components = ["llvm-tools"] の記載が必要。
 //
 // プラットフォームごとのシンボル形式の違い:
-//   - macOS (Mach-O): シンボル先頭に `_` が付く (例: _vpx_codec_encode)
-//   - Linux (ELF): 先頭 `_` なし (例: vpx_codec_encode)
+//   - macOS / iOS (Mach-O): シンボル先頭に `_` が付く (例: _vpx_codec_encode)
+//   - Linux / Android (ELF): 先頭 `_` なし (例: vpx_codec_encode)
 //   - Windows x64 (COFF): 先頭 `_` なし (例: vpx_codec_encode)
 //
 // bindgen の generated_link_name_override は返した文字列に \u{1} プレフィックスを
 // 自動付加する。\u{1} はコンパイラに「この名前をそのまま使え（マングリングするな）」と
-// 指示するため、プラットフォーム固有のシンボル名（macOS なら _shiguredo_vpx_codec_encode）を
+// 指示するため、プラットフォーム固有のシンボル名（macOS / iOS なら _shiguredo_vpx_codec_encode）を
 // そのまま返す必要がある。
 
 /// llvm-nm / llvm-objcopy のパスを保持する
@@ -375,14 +741,14 @@ struct LlvmTools {
 struct SymbolRenameMaps {
     /// llvm-objcopy の --redefine-syms 用マップ
     ///
-    /// キー: 元のシンボル名 (例: macOS なら _vpx_codec_encode、Linux なら vpx_codec_encode)
-    /// 値: 書き換え後のシンボル名 (例: macOS なら _shiguredo_vpx_codec_encode)
+    /// キー: 元のシンボル名 (例: macOS / iOS なら _vpx_codec_encode、Linux / Android なら vpx_codec_encode)
+    /// 値: 書き換え後のシンボル名 (例: macOS / iOS なら _shiguredo_vpx_codec_encode)
     objcopy_map: HashMap<String, String>,
 
     /// bindgen の #[link_name] 用マップ
     ///
     /// キー: C シンボル名 (プラットフォーム非依存、例: vpx_codec_encode)
-    /// 値: 書き換え後のシンボル名 (プラットフォーム依存、例: macOS なら _shiguredo_vpx_codec_encode)
+    /// 値: 書き換え後のシンボル名 (プラットフォーム依存、例: macOS / iOS なら _shiguredo_vpx_codec_encode)
     ///
     /// bindgen は \u{1} プレフィックスを付加してマングリングを抑制するため、
     /// 値にはプラットフォーム固有のシンボル名を格納する必要がある。
@@ -425,10 +791,10 @@ fn rewrite_symbols(lib_dir: &Path, out_dir: &Path) -> SymbolLinkNameCallbacks {
     let tools = discover_llvm_tools();
     let lib_path = find_static_library(lib_dir);
 
-    // macOS の Mach-O ではシンボル先頭に `_` が付くため、
+    // macOS / iOS の Mach-O ではシンボル先頭に `_` が付くため、
     // プラットフォーム判定してリネームマップの生成時に考慮する
-    let is_macos = env::var("CARGO_CFG_TARGET_OS")
-        .map(|v| v == "macos")
+    let is_macho = env::var("CARGO_CFG_TARGET_VENDOR")
+        .map(|v| v == "apple")
         .unwrap_or(false);
 
     // シンボル名の変換ルール
@@ -448,7 +814,7 @@ fn rewrite_symbols(lib_dir: &Path, out_dir: &Path) -> SymbolLinkNameCallbacks {
 
     // 全定義済み外部シンボルを収集してリネームマップを生成する
     let symbols = collect_defined_external_symbols(&tools.nm, &lib_path);
-    let maps = build_symbol_rename_maps(&symbols, is_macos, &rename_symbol);
+    let maps = build_symbol_rename_maps(&symbols, is_macho, &rename_symbol);
 
     // マップファイルを書き出してシンボルを書き換える
     let map_file = out_dir.join("symbol_rename_map.txt");
@@ -583,7 +949,7 @@ fn collect_defined_external_symbols(nm_path: &Path, lib_path: &Path) -> Vec<Stri
 /// llvm-nm の --format=just-symbols 出力にはオブジェクトファイル名 (vp8_cx_iface.c.o: 等) も
 /// 含まれるため、この関数で C 識別子のみをフィルタリングする。
 ///
-/// macOS の Mach-O ではシンボル先頭に `_` が付くため、`_` で始まる文字列も受け入れる。
+/// macOS / iOS の Mach-O ではシンボル先頭に `_` が付くため、`_` で始まる文字列も受け入れる。
 fn is_c_identifier(s: &str) -> bool {
     let mut chars = s.chars();
     match chars.next() {
@@ -598,8 +964,8 @@ fn is_c_identifier(s: &str) -> bool {
 /// 2 つのマップを生成する理由:
 ///
 /// objcopy_map: ライブラリバイナリ内の実シンボル名を書き換えるためのマップ。
-///   macOS では _vpx_codec_encode → _shiguredo_vpx_codec_encode のようにプラットフォーム固有の
-///   `_` プレフィックスを含む形で管理する。
+///   macOS / iOS では _vpx_codec_encode → _shiguredo_vpx_codec_encode のように
+///   プラットフォーム固有の `_` プレフィックスを含む形で管理する。
 ///
 /// bindgen_map: Rust バインディングの #[link_name] に使うマップ。
 ///   キーは C シンボル名 (vpx_codec_encode)、値はプラットフォーム固有のシンボル名
@@ -608,7 +974,7 @@ fn is_c_identifier(s: &str) -> bool {
 ///   抑制するため、プラットフォーム固有の名前を直接返す必要がある。
 fn build_symbol_rename_maps(
     symbols: &[String],
-    is_macos: bool,
+    is_macho: bool,
     rename_symbol: &dyn Fn(&str) -> Option<String>,
 ) -> SymbolRenameMaps {
     let mut objcopy_map = HashMap::new();
@@ -616,9 +982,9 @@ fn build_symbol_rename_maps(
 
     for sym in symbols {
         // プラットフォーム固有のプレフィックスを除去して C シンボル名を取得する
-        //   macOS: _vpx_codec_encode → vpx_codec_encode
-        //   Linux/Windows: vpx_codec_encode → vpx_codec_encode (変化なし)
-        let c_name = if is_macos {
+        //   macOS / iOS: _vpx_codec_encode → vpx_codec_encode
+        //   Linux / Android / Windows: vpx_codec_encode → vpx_codec_encode (変化なし)
+        let c_name = if is_macho {
             sym.strip_prefix('_').unwrap_or(sym)
         } else {
             sym.as_str()
@@ -626,9 +992,9 @@ fn build_symbol_rename_maps(
 
         if let Some(new_c_name) = rename_symbol(c_name) {
             // objcopy 用: プラットフォーム固有のプレフィックスを再付与する
-            //   macOS: shiguredo_vpx_codec_encode → _shiguredo_vpx_codec_encode
-            //   Linux/Windows: shiguredo_vpx_codec_encode → shiguredo_vpx_codec_encode (変化なし)
-            let new_sym = if is_macos {
+            //   macOS / iOS: shiguredo_vpx_codec_encode → _shiguredo_vpx_codec_encode
+            //   Linux / Android / Windows: shiguredo_vpx_codec_encode → shiguredo_vpx_codec_encode (変化なし)
+            let new_sym = if is_macho {
                 format!("_{new_c_name}")
             } else {
                 new_c_name.clone()
@@ -679,7 +1045,7 @@ fn rewrite_archive_symbols(objcopy_path: &Path, lib_path: &Path, map_file: &Path
 
 // --- 既存のヘルパー関数 ---
 
-// CARGO_CFG_TARGET_OS + CARGO_CFG_TARGET_ARCH からプラットフォーム名を生成する
+// Rust のモバイルターゲット、または OS とアーキテクチャからプラットフォーム名を生成する
 fn get_target_platform() -> String {
     if let Ok(target) = env::var("LIBVPX_TARGET") {
         return target;
@@ -687,6 +1053,20 @@ fn get_target_platform() -> String {
 
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     let target_arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
+    let rust_target = env::var("TARGET").expect("TARGET is not set");
+
+    // 同じ OS とアーキテクチャでも Catalyst や別の ABI は prebuilt と互換にならない。
+    // prebuilt と一致するターゲットだけを受け入れ、異なる ABI への誤リンクを防ぐ。
+    if target_os == "ios" || target_os == "android" {
+        return match rust_target.as_str() {
+            "aarch64-apple-ios" => "ios_arm64",
+            "aarch64-apple-ios-sim" => "ios-sim_arm64",
+            "aarch64-linux-android" => "android_arm64",
+            "x86_64-linux-android" => "android_x86_64",
+            _ => panic!("unsupported mobile target: {rust_target}"),
+        }
+        .to_string();
+    }
 
     match (target_os.as_str(), target_arch.as_str()) {
         ("linux", "x86_64") => format!("{}_x86_64", detect_linux_distro()),

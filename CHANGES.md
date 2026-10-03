@@ -13,7 +13,17 @@
 
 - [CHANGE] MSRV (`rust-version`) を 1.93 に引き上げる
   - @voluntas
+- [CHANGE] `Encoder::new` の入力検査を厳格化する
+  - `width` / `height` / `target_bitrate` / `fps_numerator` / `fps_denominator` / `min_quantizer` / `max_quantizer` / `keyframe_interval` / `lag_in_frames` / `threads` / `frame_drop_threshold` / `cq_level` を `try_from` 化し、`usize` から `c_uint` / `c_int` への切り捨てを拒否する
+  - `target_bitrate < 1000 bps` (旧実装は libvpx に素通し) と `target_bitrate > 1_000_000_000 bps` (旧実装は libvpx 側で silent clip) をいずれも `VPX_CODEC_INVALID_PARAM` で拒否する
+  - `min_quantizer > max_quantizer`、`max_quantizer > 63`、`cq_level > 63` を `Encoder::new` の時点で拒否する (旧実装は libvpx 内部任せ。63 は libvpx の制限による)
+  - エラー詳細文言が libvpx 由来からラッパー由来 (`shiguredo_libvpx::Encoder::new`) に変わる
+  - @voluntas
 - [ADD] Ubuntu 26.04 (x86_64 / arm64) 向けのビルド・CI・prebuilt 対応を追加する
+  - @voluntas
+- [ADD] iOS / Android 向けのビルド・CI・prebuilt 対応を追加する
+  - `ios_arm64` / `ios-sim_arm64` / `android_arm64` / `android_x86_64` の prebuilt を追加する
+  - arm64 シミュレーターは libvpx が公式対応していないため、configure にパッチを当てて対応する
   - @voluntas
 - [ADD] `Encoder::reconfigure` と `ReconfigureParams` を追加する
   - ビットレート・FPS・量子化レンジ・キーフレーム間隔をエンコード中に変更できる
@@ -21,11 +31,7 @@
   - 許容範囲外はすべて `VPX_CODEC_INVALID_PARAM` で拒否する
   - 失敗時は内部設定 (`self.cfg`) を変更しない
   - @voluntas
-- [CHANGE] `Encoder::new` の入力検査を厳格化する
-  - `width` / `height` / `target_bitrate` / `fps_numerator` / `fps_denominator` / `min_quantizer` / `max_quantizer` / `keyframe_interval` / `lag_in_frames` / `threads` / `frame_drop_threshold` / `cq_level` を `try_from` 化し、`usize` から `c_uint` / `c_int` への切り捨てを拒否する
-  - `target_bitrate < 1000 bps` (旧実装は libvpx に素通し) と `target_bitrate > 1_000_000_000 bps` (旧実装は libvpx 側で silent clip) をいずれも `VPX_CODEC_INVALID_PARAM` で拒否する
-  - `min_quantizer > max_quantizer`、`max_quantizer > 63`、`cq_level > 63` を `Encoder::new` の時点で拒否する (旧実装は libvpx 内部任せ。63 は libvpx の制限による)
-  - エラー詳細文言が libvpx 由来からラッパー由来 (`shiguredo_libvpx::Encoder::new`) に変わる
+- [UPDATE] libvpx v1.17.0 に更新する
   - @voluntas
 
 ### misc
