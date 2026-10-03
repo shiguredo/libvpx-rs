@@ -32,11 +32,13 @@ iOS / Android アプリから libvpx-rs を利用するときに、ソースビ�
 
 - libvpx の `git clone` 後に、arm64 シミュレーター向けのときだけ `build.rs` が次のパッチを当てる
   - `configure` の `all_platforms` に `arm64-iphonesimulator-gcc` を追加する
-  - `build/make/configure.sh` の `*-iphonesimulator-*` で、arm64 のときだけ `-miphoneos-version-min` ではなく `-mios-simulator-version-min=14.0` を使う (`-miphoneos-version-min` のままだと clang が実機 iOS と誤判定し、configure のリンク検査と生成物のプラットフォームが壊れる)
+  - `build/make/configure.sh` の `*-iphonesimulator-*` で、arm64 のときだけ `-miphoneos-version-min` ではなく `-arch arm64 -mios-simulator-version-min=14.0` を使う (`-miphoneos-version-min` のままだと clang が実機 iOS と誤判定し、configure のリンク検査と生成物のプラットフォームが壊れる)
   - 置換対象が見つからない場合は panic し、upstream の変更を検知する。upstream が対応したらパッチを削除する
-- Android は `ANDROID_NDK_HOME` の NDK ツールチェーンを `CC` / `CXX` / `AR` / `AS` / `LD` に指定する
+- Android は `ANDROID_NDK_HOME` の NDK ツールチェーンを使う
+  - `CC` / `CXX` / `AR` / `LD` に NDK のツールチェーンを指定する
+  - arm64 はアセンブリをビルドしないため `AS` は設定しない。x86_64 は configure に NASM を自動検出させ、NASM のアラインメント検査が使う `readelf` のシム (NDK の `llvm-readelf` を呼び出す) を PATH に追加する
   - API level は `ANDROID_PLATFORM` (未指定時 21、数値または `android-<数値>`)
-  - ホストは Linux / macOS / Windows の NDK ツールチェーンに対応する
+  - ホストは x86_64 Linux と macOS に対応する (Windows ホストと Linux arm64 ホストは NDK の制約により非対応とし、明示的に拒否する)
 - bindgen にはターゲットに合わせた clang 引数 (`--target` と `--sysroot` / `-isysroot`) を渡す
 - iOS 実機は libvpx の既定の最小バージョン (7.0) でビルドする
   - 13.0 以上を指定すると clang が `___chkstk_darwin` を参照するが、このシンボルは iOS 13 以降の libSystem にしか公開されない。Rust の `aarch64-apple-ios` は iOS 10.0 向けにリンクするため未定義シンボルでリンクに失敗する
@@ -50,7 +52,7 @@ iOS / Android アプリから libvpx-rs を利用するときに、ソースビ�
 ## 完了条件
 
 - 4 ターゲットの prebuilt が GitHub Release にアップロードされる
-- `cargo build --target <target>` (prebuilt パス) が各ターゲットでリンクできることを CI で検証する
+- Release ワークフローで prebuilt をダウンロードし、各ターゲットでリンクできることを検証する (PR の CI は source-build でリンクを検証する)
 - `README.md` にモバイルの動作要件とソースビルド手順を記載する
 
 ## 解決方法
