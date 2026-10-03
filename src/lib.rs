@@ -712,7 +712,6 @@ pub struct EncodeOptions {
 /// ため、FPS の動的変更は推奨しない。どうしても変更が必要な場合は、`force_keyframe`
 /// を立てて境界を明示する運用にする。
 #[derive(Debug, Clone, Default)]
-#[non_exhaustive]
 pub struct ReconfigureParams {
     /// エンコードビットレート (bps)
     ///
