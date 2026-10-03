@@ -333,7 +333,7 @@ fn build_from_source_unix(src_dir: &Path) {
 struct MobileSourceBuildConfig {
     /// configure に追加する引数
     configure_args: Vec<String>,
-    /// configure に渡す環境変数 (CC / CXX / AR / AS / LD)
+    /// configure に渡す環境変数 (CC / CXX / AR / LD と x86_64 の PATH)
     envs: Vec<(String, String)>,
 }
 
@@ -353,6 +353,13 @@ fn get_mobile_source_build_config(target_os: &str) -> MobileSourceBuildConfig {
 
 /// iOS 向けソースビルド設定を返す
 fn get_ios_source_build_config() -> MobileSourceBuildConfig {
+    // iOS のクロスビルドには Xcode (xcrun) が必要なため、macOS ホスト以外は拒否する。
+    // 非 macOS ホストでは configure が成功したように見えて libvpx.a が生成されず、
+    // 後続のシンボル書き換えで分かりにくいエラーになる
+    if env::consts::OS != "macos" {
+        panic!("iOS source-build requires a macOS host with Xcode");
+    }
+
     let rust_target = env::var("TARGET").expect("TARGET is not set");
     let mut configure_args = match rust_target.as_str() {
         // iOS 実機。configure が iphoneos SDK の clang を自動選択する。
@@ -400,7 +407,7 @@ fn get_android_source_build_config() -> MobileSourceBuildConfig {
     let mut configure_args = vec![
         format!("--target={configure_target}"),
         // Android アプリの共有ライブラリに静的にリンクするため PIC を有効にする。
-        // NASM のアセンブリにも -DPIC が渡り、テキスト再配置を防げる
+        // CONFIG_PIC が vpx_config.asm 経由で NASM の PIC マクロにも伝わる
         "--enable-pic".to_string(),
     ];
     configure_args.extend(disable_extra_build_targets());
@@ -411,16 +418,10 @@ fn get_android_source_build_config() -> MobileSourceBuildConfig {
         ("AR".to_string(), llvm_ar.display().to_string()),
         ("LD".to_string(), clang.display().to_string()),
     ];
-    if rust_target == "aarch64-linux-android" {
-        // arm64 の .S は clang でアセンブルする。
-        // AS が clang の場合、configure がアセンブルに -c を付与する。
-        // x86_64 の .asm は NASM でアセンブルするため AS は設定しない
-        // (configure が NASM を自動検出する)
-        envs.push(("AS".to_string(), clang.display().to_string()));
-    } else {
+    if rust_target == "x86_64-linux-android" {
         // x86_64 の NASM アラインメント検査は readelf を使う。
         // macOS には readelf がないため、NDK の llvm-readelf を呼ぶシムを
-        // PATH に追加する
+        // PATH に追加する。arm64 はアセンブリをビルドしないため不要
         envs.push(create_readelf_shim_env(&toolchain_bin));
     }
 
@@ -440,19 +441,20 @@ fn create_readelf_shim_env(toolchain_bin: &Path) -> (String, String) {
     let shim_dir = out_dir.join("ndk-bin-shims");
     fs::create_dir_all(&shim_dir).expect("failed to create shim directory");
 
-    let llvm_readelf = toolchain_bin.join(exe_name("llvm-readelf"));
+    let llvm_readelf = toolchain_bin.join("llvm-readelf");
     if !llvm_readelf.exists() {
         panic!("Android NDK tool not found: {}", llvm_readelf.display());
     }
 
-    let shim_path = shim_dir.join(exe_name("readelf"));
+    let shim_path = shim_dir.join("readelf");
     fs::write(
         &shim_path,
         format!("#!/bin/sh\nexec \"{}\" \"$@\"\n", llvm_readelf.display()),
     )
     .expect("failed to write readelf shim");
 
-    // 実行権限を付与する (Windows ホストでは configure 自体が動作しないため対象外)
+    // 実行権限を付与する (Windows ホストは android_toolchain_bin_dir で拒否するが、
+    // Windows 向けのコンパイルでも通るように cfg を付ける)
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -508,12 +510,25 @@ fn android_toolchain_bin_dir() -> PathBuf {
         env::var_os("ANDROID_NDK_HOME")
             .expect("ANDROID_NDK_HOME is not set. Set it to the Android NDK directory"),
     );
-    // NDK が提供するホスト別のツールチェーンを使う
-    let host_tag = match env::consts::OS {
-        "linux" => "linux-x86_64",
-        "macos" => "darwin-x86_64",
-        "windows" => "windows-x86_64",
-        os => panic!("unsupported Android NDK host: {os}"),
+    // libvpx の configure は CC などのパスをクォートせずに実行するため、
+    // スペースを含むパスは早期に拒否する
+    if ndk.to_string_lossy().contains(' ') {
+        panic!(
+            "ANDROID_NDK_HOME must not contain spaces: {}",
+            ndk.display()
+        );
+    }
+
+    // NDK が提供するホスト別のツールチェーンを使う。
+    // Linux arm64 と Windows には NDK のツールチェーンが存在しない
+    let host_tag = match (env::consts::OS, env::consts::ARCH) {
+        ("linux", "x86_64") => "linux-x86_64",
+        // macOS は x86_64 / arm64 とも darwin-x86_64 (fat バイナリ)
+        ("macos", _) => "darwin-x86_64",
+        (os, arch) => panic!(
+            "Android NDK does not provide a toolchain for {os} {arch}. \
+             Use an x86_64 Linux host or macOS"
+        ),
     };
     ndk.join("toolchains/llvm/prebuilt")
         .join(host_tag)
@@ -531,7 +546,7 @@ fn android_toolchain_bin_dir() -> PathBuf {
 // 2 が必要な理由: iphonesimulator 向けの共通設定は -miphoneos-version-min を
 // 使っているが、arm64 でこのフラグと -isysroot <iphonesimulator> を組み合わせると
 // clang が実機 iOS 向けと誤判定し、configure のリンク検査と生成物の
-// プラットフォームが壊れる。arm64 シミュレーターの最小バージョンは 14.0 なため、
+// プラットフォームが壊れる。arm64 シミュレーターの最小バージョンは 14.0 のため、
 // -mios-simulator-version-min=14.0 と -arch arm64 を明示する。
 //
 // 置換対象が見つからない場合は upstream の変更を検知するため panic する。
@@ -551,6 +566,7 @@ fn apply_libvpx_patches(src_dir: &Path) {
     let configure_path = src_dir.join("configure");
     let configure = fs::read_to_string(&configure_path).expect("failed to read libvpx configure");
     let configure = replace_once(
+        "configure",
         &configure,
         "all_platforms=\"${all_platforms} x86_64-iphonesimulator-gcc\"",
         concat!(
@@ -565,6 +581,7 @@ fn apply_libvpx_patches(src_dir: &Path) {
     let configure_sh =
         fs::read_to_string(&configure_sh_path).expect("failed to read libvpx configure.sh");
     let configure_sh = replace_once(
+        "build/make/configure.sh",
         &configure_sh,
         concat!(
             "    *-iphonesimulator-*)\n",
@@ -590,10 +607,12 @@ fn apply_libvpx_patches(src_dir: &Path) {
 /// 文字列を 1 箇所だけ置換する
 ///
 /// 置換対象がちょうど 1 箇所でない場合は upstream の変更を検知するため panic する。
-fn replace_once(content: &str, from: &str, to: &str) -> String {
+fn replace_once(file: &str, content: &str, from: &str, to: &str) -> String {
     let count = content.matches(from).count();
     if count != 1 {
-        panic!("expected exactly one occurrence of the patch target, found {count}: {from:?}");
+        panic!(
+            "expected exactly one occurrence of the patch target in {file}, found {count}: {from:?}"
+        );
     }
     content.replacen(from, to, 1)
 }
