@@ -23,7 +23,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # iOS 実機 arm64
           - target: ios_arm64
             rust-target: aarch64-apple-ios
             os: macos-15
@@ -33,12 +32,10 @@ jobs:
           - target: ios-sim_arm64
             rust-target: aarch64-apple-ios-sim
             os: macos-15
-          # Android arm64-v8a
           - target: android_arm64
             rust-target: aarch64-linux-android
             ndk-target: aarch64-linux-android
             os: ubuntu-24.04
-          # Android x86_64
           - target: android_x86_64
             rust-target: x86_64-linux-android
             ndk-target: x86_64-linux-android
@@ -61,7 +58,7 @@ jobs:
         env:
           RELEASE_VERSION: ${{ inputs.release-version }}
         run: |
-          package_version=$(cargo metadata --locked --no-deps --format-version=1 \
+          package_version=$(cargo metadata --no-deps --format-version=1 \
             | jq -r '.packages[] | select(.name == "shiguredo_libvpx") | .version')
           if [ "$RELEASE_VERSION" != "$package_version" ]; then
             echo "::error::release version does not match Cargo package version"
@@ -70,7 +67,7 @@ jobs:
 
       # libvpx の x86_64 ビルドには NASM が必要。
       - name: Install NASM (Linux)
-        if: runner.os == 'Linux'
+        if: matrix.target == 'android_x86_64'
         run: sudo apt-get update && sudo apt-get install -y nasm
 
       - name: Set up Android NDK
@@ -91,8 +88,12 @@ jobs:
       - name: Build and verify Rust linking with source-build
         id: build
         run: |
-          cargo test --release --locked --lib --no-run --target "$RUST_TARGET" --features source-build \
-            --message-format=json > build-messages.json
+          if ! cargo test --release --locked --lib --no-run --target "$RUST_TARGET" --features source-build \
+            --message-format=json > build-messages.json; then
+            # --message-format=json では診断がログに出ないため、失敗時に展開して表示する
+            jq -r 'select(.reason == "compiler-message") | .message.rendered // empty' build-messages.json 1>&2
+            exit 1
+          fi
           # キャッシュ内の古い出力を拾わないよう、今回の build.rs の出力先を取得する。
           package_id=$(cargo pkgid)
           out_dir=$(jq -r --arg package_id "$package_id" \
