@@ -31,6 +31,7 @@ Please read <https://github.com/shiguredo/oss> before use.
 - VP8 固有設定 (デノイザー、ARNR フィルタ)
 - シンボル書き換えによる他ライブラリとの衝突回避 (`shiguredo_vpx_` プレフィックス付与)
 - prebuilt バイナリによる高速ビルド (デフォルト)
+- iOS 実機 / シミュレーター (arm64) と Android (arm64-v8a / x86_64) の prebuilt 対応
 - ソースからのビルドも可能 (`--features source-build`)
 
 ## 動作要件
@@ -45,6 +46,10 @@ Please read <https://github.com/shiguredo/oss> before use.
 - macOS 15 arm64
 - Windows Server 2025 x86_64
 - Windows 11 x86_64
+- iOS 実機 arm64 (iOS 13.0 以降)
+- iOS シミュレーター arm64 (iOS 14.0 以降)
+- Android arm64-v8a (API level 21 以降)
+- Android x86_64 (API level 21 以降)
 
 ### ソースビルド時の追加要件
 
@@ -52,6 +57,8 @@ Please read <https://github.com/shiguredo/oss> before use.
 - C コンパイラ (`build-essential` 等)
 - YASM または NASM (libvpx のアセンブリ最適化に必要)
 - Windows の場合は MSYS2 + MINGW64 (`gcc` / `make` / `nasm` / `clang`) が必要
+- iOS の場合は Xcode
+- Android の場合は Android NDK (`ANDROID_NDK_HOME` で指定)
 
 ```bash
 # Ubuntu
@@ -72,6 +79,29 @@ pacman -S git make nasm mingw-w64-x86_64-gcc mingw-w64-x86_64-binutils mingw-w64
 cargo build
 ```
 
+### iOS / Android 向け prebuilt
+
+Cargo のターゲットに応じて、以下のアーカイブを自動選択します。
+各アーカイブにはシンボル書き換え済みの `lib/libvpx.a`、`bindings.rs`、libvpx の `LICENSE` と `PATENTS` を収録し、SHA256 チェックサムを添付します。
+
+| 対象 | Rust ターゲット | アーカイブ名 |
+| --- | --- | --- |
+| iOS 実機 arm64 | `aarch64-apple-ios` | `libvpx-ios_arm64.tar.gz` |
+| iOS シミュレーター arm64 | `aarch64-apple-ios-sim` | `libvpx-ios-sim_arm64.tar.gz` |
+| Android arm64-v8a | `aarch64-linux-android` | `libvpx-android_arm64.tar.gz` |
+| Android x86_64 | `x86_64-linux-android` | `libvpx-android_x86_64.tar.gz` |
+
+prebuilt の対象は iOS 実機が 10.0 以降 (Rust ターゲットの下限)、iOS シミュレーターが 14.0 以降、Android が API level 21 以降です。
+
+```bash
+rustup target add aarch64-apple-ios
+cargo build --target aarch64-apple-ios
+```
+
+アプリケーションのリンクには、iOS では Xcode と各ターゲットの下限以上のデプロイメントターゲット設定、Android では Android NDK と対象 ABI のリンカー設定が必要です。
+Android では `CARGO_TARGET_<ターゲット>_LINKER` に NDK の clang を指定してください。
+[iOS の Rust ターゲット](https://doc.rust-lang.org/rustc/platform-support/apple-ios.html) と [Android NDK ガイド](https://developer.android.com/ndk/guides) も参照してください。
+
 ### ソースからビルド
 
 libvpx をソースからビルドする場合は `source-build` feature を有効にしてください。
@@ -79,6 +109,31 @@ libvpx をソースからビルドする場合は `source-build` feature を有�
 ```bash
 cargo build --features source-build
 ```
+
+iOS では、Xcode の SDK を使って実機とシミュレーターをビルドします。
+実機の最小バージョンは libvpx の既定 (7.0) を使います。
+arm64 シミュレーターは libvpx 本体が未対応のため、`build.rs` が configure にパッチを当てて対応します (最小バージョンは 14.0 固定)。
+
+```bash
+cargo build --target aarch64-apple-ios --features source-build
+cargo build --target aarch64-apple-ios-sim --features source-build
+```
+
+Android では、`ANDROID_NDK_HOME` に NDK のディレクトリを指定します。
+`ANDROID_PLATFORM` で最小 API level を数値または `android-<数値>` の形式で指定でき、未指定の場合は `21` です。
+指定できる API level は `21` 以降です。
+以下は Linux ホストでの arm64-v8a 向けの例です。
+
+```bash
+export ANDROID_NDK_HOME=/path/to/android-ndk
+export ANDROID_PLATFORM=21
+export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang"
+rustup target add aarch64-linux-android
+cargo build --target aarch64-linux-android --features source-build
+```
+
+リリース用の Android prebuilt は NDK `28.2.13676358` でビルドします。
+CI では、すべてのモバイルターゲットでソースビルド、シンボル書き換え、Rust のリンク、アーカイブ生成を検証します。
 
 ### docs.rs 向けビルド
 
@@ -322,6 +377,8 @@ VP8 の場合は `codec: DecoderCodec::Vp8` を指定してください。
 | 変数 | 説明 |
 |---|---|
 | `LIBVPX_TARGET` | prebuilt バイナリのプラットフォーム名を明示的に指定する |
+| `ANDROID_NDK_HOME` | Android 向けソースビルドで使用する NDK のディレクトリ |
+| `ANDROID_PLATFORM` | Android 向けソースビルドの最小 API level (未指定時 21) |
 
 ## libvpx ライセンス
 

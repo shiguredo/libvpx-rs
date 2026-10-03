@@ -169,8 +169,17 @@ jobs:
             libvpx-windows_x86_64.tar.gz.sha256 `
             --clobber
 
+  build-mobile-prebuilt:
+    name: Build mobile prebuilt
+    needs: github-release
+    permissions:
+      contents: write
+    uses: ./.github/workflows/mobile.yml
+    with:
+      release-version: ${{ needs.github-release.outputs.version }}
+
   publish:
-    needs: [github-release, build-prebuilt, build-prebuilt-windows]
+    needs: [github-release, build-prebuilt, build-prebuilt-windows, build-mobile-prebuilt]
     runs-on: ubuntu-24.04
     environment: release
     permissions:
@@ -184,7 +193,7 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
 
   slack_notify:
-    needs: [github-release, build-prebuilt, build-prebuilt-windows, publish]
+    needs: [github-release, build-prebuilt, build-prebuilt-windows, build-mobile-prebuilt, publish]
     timeout-minutes: 20
     runs-on: ubuntu-slim
     if: ${{ always() }}

@@ -1,0 +1,171 @@
+name: Mobile prebuilt
+
+on:
+  workflow_call:
+    inputs:
+      release-version:
+        description: GitHub Release にアップロードするバージョン。空の場合はビルドと検証のみ実行する
+        type: string
+        default: ""
+
+env:
+  RUST_BACKTRACE: 1
+  ANDROID_PLATFORM: "21"
+  ANDROID_NDK_VERSION: "28.2.13676358"
+
+jobs:
+  build:
+    name: Build prebuilt (${{ matrix.target }})
+    # iOS には Xcode、Android には Android SDK と NDK が必要なため ubuntu-slim は使えない。
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # iOS 実機 arm64
+          - target: ios_arm64
+            rust-target: aarch64-apple-ios
+            os: macos-15
+          # iOS arm64 シミュレーター
+          # libvpx は arm64 シミュレーターを公式サポートしないため、
+          # build.rs が configure にパッチを当ててビルドする
+          - target: ios-sim_arm64
+            rust-target: aarch64-apple-ios-sim
+            os: macos-15
+          # Android arm64-v8a
+          - target: android_arm64
+            rust-target: aarch64-linux-android
+            ndk-target: aarch64-linux-android
+            os: ubuntu-24.04
+          # Android x86_64
+          - target: android_x86_64
+            rust-target: x86_64-linux-android
+            ndk-target: x86_64-linux-android
+            os: ubuntu-24.04
+    env:
+      PREBUILT_TARGET: ${{ matrix.target }}
+      RUST_TARGET: ${{ matrix.rust-target }}
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up Rust target
+        run: |
+          rustup update stable
+          rustup target add "$RUST_TARGET"
+
+      # build.rs の取得先とアップロード先が同じリリースであることを保証する。
+      - name: Verify release version
+        if: inputs.release-version != ''
+        env:
+          RELEASE_VERSION: ${{ inputs.release-version }}
+        run: |
+          package_version=$(cargo metadata --locked --no-deps --format-version=1 \
+            | jq -r '.packages[] | select(.name == "shiguredo_libvpx") | .version')
+          if [ "$RELEASE_VERSION" != "$package_version" ]; then
+            echo "::error::release version does not match Cargo package version"
+            exit 1
+          fi
+
+      # libvpx の x86_64 ビルドには NASM が必要。
+      - name: Install NASM (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y nasm
+
+      - name: Set up Android NDK
+        if: startsWith(matrix.target, 'android_')
+        env:
+          NDK_TARGET: ${{ matrix.ndk-target }}
+        run: |
+          ndk_dir="$ANDROID_HOME/ndk/$ANDROID_NDK_VERSION"
+          if [ ! -d "$ndk_dir" ]; then
+            "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;$ANDROID_NDK_VERSION"
+          fi
+          echo "ANDROID_NDK_HOME=$ndk_dir" >> "$GITHUB_ENV"
+          target_key=$(echo "$RUST_TARGET" | tr '[:lower:]-' '[:upper:]_')
+          echo "CARGO_TARGET_${target_key}_LINKER=$ndk_dir/toolchains/llvm/prebuilt/linux-x86_64/bin/${NDK_TARGET}${ANDROID_PLATFORM}-clang" >> "$GITHUB_ENV"
+
+      # rlib だけでは C シンボルのリンクを検証できないため、テスト実行ファイルを生成する。
+      # 実行には実機またはエミュレーターが必要なので、ここではリンクまで検証する。
+      - name: Build and verify Rust linking with source-build
+        id: build
+        run: |
+          cargo test --release --locked --lib --no-run --target "$RUST_TARGET" --features source-build \
+            --message-format=json > build-messages.json
+          # キャッシュ内の古い出力を拾わないよう、今回の build.rs の出力先を取得する。
+          package_id=$(cargo pkgid)
+          out_dir=$(jq -r --arg package_id "$package_id" \
+            'select(.reason == "build-script-executed" and .package_id == $package_id) | .out_dir' \
+            build-messages.json)
+          if [ ! -f "$out_dir/build/libvpx/lib/libvpx.a" ]; then
+            echo "::error::installed static library not found"
+            exit 1
+          fi
+          echo "out-dir=$out_dir" >> "$GITHUB_OUTPUT"
+
+      - name: Verify symbols and create prebuilt archive
+        shell: bash
+        env:
+          LIBVPX_OUT_DIR: ${{ steps.build.outputs.out-dir }}
+        run: |
+          lib_path="$LIBVPX_OUT_DIR/build/libvpx/lib/libvpx.a"
+          sysroot=$(rustc --print sysroot)
+          host_triple=$(rustc -vV | sed -n 's/^host: //p')
+          llvm_nm="$sysroot/lib/rustlib/$host_triple/bin/llvm-nm"
+
+          # Mach-O の先頭 _ を除いて、全定義済み外部シンボルを検証する。
+          "$llvm_nm" --defined-only --extern-only --format=just-symbols "$lib_path" > symbols.txt
+          symbols=$(sed 's/^_//' symbols.txt | grep -E '^[a-zA-Z_][a-zA-Z0-9_]*$')
+          if echo "$symbols" | grep -v '^shiguredo_vpx_'; then
+            echo "::error::symbols without shiguredo_vpx_ prefix found"
+            exit 1
+          fi
+
+          mkdir -p staging/lib
+          cp "$lib_path" staging/lib/
+          cp "$LIBVPX_OUT_DIR/bindings.rs" staging/
+          # バイナリ再配布時にも libvpx のライセンス表示を同梱する。
+          cp "$LIBVPX_OUT_DIR/build/libvpx/LICENSE" staging/
+          cp "$LIBVPX_OUT_DIR/build/libvpx/PATENTS" staging/
+          archive="libvpx-$PREBUILT_TARGET.tar.gz"
+          COPYFILE_DISABLE=1 tar czf "$archive" -C staging .
+          if command -v sha256sum > /dev/null; then
+            sha256sum "$archive" > "$archive.sha256"
+          else
+            shasum -a 256 "$archive" > "$archive.sha256"
+          fi
+
+      - name: Verify prebuilt archive
+        env:
+          LIBVPX_OUT_DIR: ${{ steps.build.outputs.out-dir }}
+        run: |
+          archive="libvpx-$PREBUILT_TARGET.tar.gz"
+          if command -v sha256sum > /dev/null; then
+            sha256sum --check "$archive.sha256"
+          else
+            shasum -a 256 --check "$archive.sha256"
+          fi
+          mkdir -p unpacked
+          tar xzf "$archive" -C unpacked
+          # 配布する実物が、リンク済みのライブラリと生成したバインディングに一致することを検証する。
+          cmp "$LIBVPX_OUT_DIR/build/libvpx/lib/libvpx.a" unpacked/lib/libvpx.a
+          cmp "$LIBVPX_OUT_DIR/bindings.rs" unpacked/bindings.rs
+          cmp "$LIBVPX_OUT_DIR/build/libvpx/LICENSE" unpacked/LICENSE
+          cmp "$LIBVPX_OUT_DIR/build/libvpx/PATENTS" unpacked/PATENTS
+
+      - name: Upload prebuilt archive
+        if: inputs.release-version != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ inputs.release-version }}
+        run: |
+          gh release upload "$RELEASE_VERSION" \
+            "libvpx-$PREBUILT_TARGET.tar.gz" \
+            "libvpx-$PREBUILT_TARGET.tar.gz.sha256" \
+            --clobber
+
+      # アップロード済みの成果物を build.rs が自動選択し、リンクできることも確認する。
+      - name: Verify released prebuilt
+        if: inputs.release-version != ''
+        run: cargo test --release --locked --lib --no-run --target "$RUST_TARGET"
