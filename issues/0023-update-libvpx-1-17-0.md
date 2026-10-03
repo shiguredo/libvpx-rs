@@ -1,7 +1,7 @@
 # libvpx v1.17.0 に更新する
 
 - Created: 2026-10-03
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-03
 - Branch: feature/update-libvpx-mobile-prebuilt
 - Polished: {YYYY-MM-DD}
 
@@ -33,4 +33,12 @@ libvpx v1.17.0 の修正・最適化を取り込み、モバイル prebuilt 対�
 
 ## 解決方法
 
-{記入}
+`Cargo.toml` の `[package.metadata.external-dependencies.libvpx]` を `v1.17.0` に更新した。
+
+- v1.17.0 は ABI 互換のため bindings の再生成以外のコード変更は不要
+- v1.17.0 の挙動変更が既存実装に影響しないことを確認した
+  - 既存実装は `vpx_img_alloc` の戻り画像を使うため U/V stride は常に一致し、フォーマットも検証対象の一覧に含まれる
+  - デコード画像の `w`/`h` の意味変更は、`d_w`/`d_h` を参照している既存実装に影響しない
+  - HBD 入力のレンジ外は libvpx が `VPX_CODEC_INVALID_PARAM` を返し、既存のエラーパスで処理される
+- ホスト向けの `cargo test --features source-build` が v1.17.0 で 29 件すべて成功することを確認した
+- `CHANGES.md` に `[UPDATE] libvpx v1.17.0 に更新する` を追記した
