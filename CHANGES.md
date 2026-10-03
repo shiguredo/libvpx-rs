@@ -39,6 +39,11 @@
 - [UPDATE] `prek.toml` を shiguredo-rust 規約に合わせて整備する
   - builtin フックの拡充、tombi lint/format の追加、`cargo test` を `pre-push` 専用にする
   - @voluntas
+- [UPDATE] `rust-toolchain.toml` の channel を MSRV (1.93) に固定し、CI も同ツールチェーンで実行する
+  - @voluntas
+- [UPDATE] CI の runner を shiguredo-github-actions 規約に合わせる
+  - `windows-2025` を `windows-2025-vs2026` に、`ubuntu-latest` を `ubuntu-slim` に変更する
+  - @voluntas
 
 ## 2026.1.0
 

@@ -11,7 +11,7 @@ env:
 jobs:
   github-release:
     name: "Create GitHub Release"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-slim
     outputs:
       version: ${{ steps.get_version.outputs.VERSION }}
     steps:
@@ -115,13 +115,11 @@ jobs:
     needs: github-release
     permissions:
       contents: write
-    runs-on: windows-2025
+    runs-on: windows-2025-vs2026
     timeout-minutes: 45
     steps:
       - name: Checkout sources
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-
-      - run: rustup update stable
 
       - name: Setup MSYS2
         uses: msys2/setup-msys2@e9898307ac31d1a803454791be09ab9973336e1c # v2.31.1
@@ -137,6 +135,7 @@ jobs:
             mingw-w64-x86_64-binutils
             mingw-w64-x86_64-clang
 
+      # ツールチェーンは rust-toolchain.toml で MSRV に固定している
       - run: rustup target add x86_64-pc-windows-gnu
 
       # msys2/setup-msys2 が提供するカスタムシェル

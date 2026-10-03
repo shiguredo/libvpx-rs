@@ -20,7 +20,9 @@ version = "v1.17.0"
 [dependencies]
 
 [build-dependencies]
+# libvpx の C ヘッダーから Rust バインディングを生成する
 bindgen = "0.72"
+# Cargo.toml の package.metadata から外部ライブラリの URL とバージョンを読み取る
 shiguredo_toml = "2026.2"
 
 [features]

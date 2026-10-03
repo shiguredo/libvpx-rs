@@ -1,3 +1,4 @@
+# channel は Cargo.toml の rust-version (MSRV) と揃える
 [toolchain]
-channel = "stable"
+channel = "1.93"
 components = ["rustfmt", "clippy", "llvm-tools"]
