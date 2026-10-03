@@ -1,7 +1,7 @@
 # iOS / Android 向け prebuilt を追加する
 
 - Created: 2026-10-03
-- Completed: {YYYY-MM-DD}
+- Completed: 2026-10-03
 - Branch: feature/update-libvpx-mobile-prebuilt
 - Polished: {YYYY-MM-DD}
 
@@ -57,4 +57,15 @@ iOS / Android アプリから libvpx-rs を利用するときに、ソースビ�
 
 ## 解決方法
 
-{記入}
+`build.rs` にモバイル 4 ターゲット (`ios_arm64` / `ios-sim_arm64` / `android_arm64` / `android_x86_64`) のソースビルドと prebuilt 選択を追加し、`.github/workflows/mobile.yml` を CI と Release から呼び出すようにした。
+
+- iOS 実機は `--target=arm64-darwin-gcc` で configure が iphoneos SDK を自動選択する。最小バージョンは libvpx 既定の 7.0 のまま使う (13.0 以上では `___chkstk_darwin` が未定義になるため)
+- arm64 シミュレーターは configure と build/make/configure.sh にパッチを当てて `arm64-iphonesimulator-gcc` を利用する。置換対象がちょうど 1 箇所であることを検証し、見つからない場合は panic して upstream の変更を検知する
+- Android は NDK の clang ラッパーを `CC` / `CXX` / `AR` / `LD` に指定し、`--enable-pic` を有効にする。x86_64 は NASM と `llvm-readelf` を呼ぶ readelf シムを使う
+- ホストは x86_64 Linux と macOS に対応し、Windows ホストと Linux arm64 ホストは明示的に拒否する
+- bindgen には `--target` と `--sysroot` / `-isysroot` を渡す
+- prebuilt アーカイブには `lib/libvpx.a`、`bindings.rs`、`LICENSE`、`PATENTS` を含め、SHA256 チェックサムを添付する
+- ローカルで 4 ターゲットのソースビルドとリンクを確認し、GitHub Actions の mobile ジョブでも 4 ターゲットすべて成功した
+- `README.md` にモバイルの動作要件、prebuilt の対応表、ソースビルド手順を追記した
+
+モバイル prebuilt のアップロードと prebuilt を使った再リンク検証は、次回リリースで初めて実行される。
