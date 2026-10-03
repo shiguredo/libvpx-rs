@@ -46,16 +46,17 @@ Please read <https://github.com/shiguredo/oss> before use.
 - macOS 15 arm64
 - Windows Server 2025 x86_64
 - Windows 11 x86_64
-- iOS 実機 arm64 (iOS 13.0 以降)
-- iOS シミュレーター arm64 (iOS 14.0 以降)
-- Android arm64-v8a (API level 21 以降)
-- Android x86_64 (API level 21 以降)
+- iOS 実機 arm64
+- iOS シミュレーター arm64
+- Android arm64-v8a
+- Android x86_64
 
 ### ソースビルド時の追加要件
 
 - Git
 - C コンパイラ (`build-essential` 等)
 - YASM または NASM (libvpx のアセンブリ最適化に必要)
+- libclang (bindgen が使用する)
 - Windows の場合は MSYS2 + MINGW64 (`gcc` / `make` / `nasm` / `clang`) が必要
 - iOS の場合は Xcode
 - Android の場合は Android NDK (`ANDROID_NDK_HOME` で指定)
@@ -92,14 +93,14 @@ Cargo のターゲットに応じて、以下のアーカイブを自動選択�
 | Android x86_64 | `x86_64-linux-android` | `libvpx-android_x86_64.tar.gz` |
 
 prebuilt の対象は iOS 実機が 10.0 以降 (Rust ターゲットの下限)、iOS シミュレーターが 14.0 以降、Android が API level 21 以降です。
+モバイル向けの成果物は、対応を追加したバージョンの GitHub Release から提供します。
 
 ```bash
 rustup target add aarch64-apple-ios
 cargo build --target aarch64-apple-ios
 ```
 
-アプリケーションのリンクには、iOS では Xcode と各ターゲットの下限以上のデプロイメントターゲット設定、Android では Android NDK と対象 ABI のリンカー設定が必要です。
-Android では `CARGO_TARGET_<ターゲット>_LINKER` に NDK の clang を指定してください。
+アプリケーションのリンクには、iOS では Xcode と各ターゲットの下限以上のデプロイメントターゲット設定、Android では Android NDK と対象 ABI のリンカー設定 (`CARGO_TARGET_<ターゲット>_LINKER` に NDK の clang) が必要です。
 [iOS の Rust ターゲット](https://doc.rust-lang.org/rustc/platform-support/apple-ios.html) と [Android NDK ガイド](https://developer.android.com/ndk/guides) も参照してください。
 
 ### ソースからビルド
