@@ -116,11 +116,17 @@ jobs:
     permissions:
       contents: write
     runs-on: windows-2025-vs2026
-    timeout-minutes: 45
+    # MSVC 向けソリューションは Debug / Release の 2 構成をビルドするため、
+    # MinGW (単一構成) だった頃より時間がかかる
+    timeout-minutes: 60
     steps:
       - name: Checkout sources
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
+      # コンパイラには MSVC (cl.exe / msbuild.exe) を使う。
+      # MSYS2 は configure / GNU make / nasm が動く POSIX シェルとして用意する。
+      # 以降の shell: msys2 {0} は setup-msys2 のカスタムシェルで、{0} は run: の
+      # 内容を書き出した一時スクリプトのパスに置換される
       - name: Setup MSYS2
         uses: msys2/setup-msys2@e9898307ac31d1a803454791be09ab9973336e1c # v2.31.1
         with:
@@ -131,28 +137,39 @@ jobs:
             git
             make
             nasm
-            mingw-w64-x86_64-gcc
-            mingw-w64-x86_64-binutils
             mingw-w64-x86_64-clang
 
-      # ツールチェーンは rust-toolchain.toml で MSRV に固定している
-      - run: rustup target add x86_64-pc-windows-gnu
-
-      # msys2/setup-msys2 が提供するカスタムシェル
-      # {0} は GitHub Actions が run: の内容を書き出した一時スクリプトのパスに置換される
+      # ツールチェーンは rust-toolchain.toml で MSRV に固定している。
+      # ホストのターゲット (x86_64-pc-windows-msvc) でビルドする
       - name: Build with source-build
         shell: msys2 {0}
         env:
           LIBCLANG_PATH: /mingw64/bin
-        run: cargo build --release --target x86_64-pc-windows-gnu --features source-build
+        run: cargo build --release --features source-build
 
       - name: Find OUT_DIR and create prebuilt archive
         shell: msys2 {0}
         run: |
-          OUT_DIR=$(find target/x86_64-pc-windows-gnu/release/build/shiguredo_libvpx-*/out -maxdepth 0 -type d 2>/dev/null | head -1)
+          OUT_DIR=$(find target/release/build/shiguredo_libvpx-*/out -maxdepth 0 -type d -print -quit)
           mkdir -p staging/lib
-          cp "${OUT_DIR}/build/libvpx/lib/libvpx.a" staging/lib/
+          cp "${OUT_DIR}/build/libvpx/lib/vpx.lib" staging/lib/
           cp "${OUT_DIR}/bindings.rs" staging/
+          # シンボル書き換えが効いていないライブラリを配布しないよう、アーカイブ作成前に検証する。
+          # Windows の llvm-nm.exe は出力に \r が混じるため、行末アンカーの検査の前に除去する
+          sysroot=$(cygpath -u "$(rustc --print sysroot)")
+          host_triple=$(rustc -vV | tr -d '\r' | sed -n 's/^host: //p')
+          "$sysroot/lib/rustlib/$host_triple/bin/llvm-nm.exe" \
+            --defined-only --extern-only --format=just-symbols staging/lib/vpx.lib \
+            | tr -d '\r' > target/defined-symbols.txt
+          defined_symbols=$(grep -E '^[a-zA-Z_][a-zA-Z0-9_]*$' target/defined-symbols.txt || true)
+          if [ -z "$defined_symbols" ]; then
+            echo "::error::defined symbols not found in the static library"
+            exit 1
+          fi
+          if echo "$defined_symbols" | grep -v '^shiguredo_vpx_'; then
+            echo "::error::symbols without shiguredo_vpx_ prefix found"
+            exit 1
+          fi
           tar czf libvpx-windows_x86_64.tar.gz -C staging .
 
       - name: Generate SHA256 checksum
@@ -167,6 +184,11 @@ jobs:
             libvpx-windows_x86_64.tar.gz `
             libvpx-windows_x86_64.tar.gz.sha256 `
             --clobber
+
+      # アップロード済みの prebuilt を build.rs が自動選択し、リンクとテストが通ることも確認する
+      - name: Verify released prebuilt
+        shell: msys2 {0}
+        run: cargo test --release --locked
 
   build-mobile-prebuilt:
     name: Build mobile prebuilt

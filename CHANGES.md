@@ -19,6 +19,12 @@
   - `min_quantizer > max_quantizer`、`max_quantizer > 63`、`cq_level > 63` を `Encoder::new` の時点で拒否する (旧実装は libvpx 内部任せ。63 は libvpx の制限による)
   - エラー詳細文言が libvpx 由来からラッパー由来 (`shiguredo_libvpx::Encoder::new`) に変わる
   - @voluntas
+- [CHANGE] Windows のビルドを MinGW から MSVC に切り替える
+  - Windows は `x86_64-pc-windows-msvc` のみをサポートし、`x86_64-pc-windows-gnu` (MinGW) は非対応になる
+  - ソースビルドは Visual Studio の C++ ビルドツール (msbuild.exe / cl.exe) を使い、configure の `--target` はインストールされた Visual Studio のバージョンに合わせて選ぶ
+  - Windows 向け prebuilt アーカイブは `lib/vpx.lib` (MSVC でビルドした静的ライブラリ) を収録する
+  - CI と Release の Windows ジョブを MSVC ビルドに切り替え、シンボル書き換えと MSVC CRT の検証を追加する
+  - @voluntas
 - [ADD] Ubuntu 26.04 (x86_64 / arm64) 向けのビルド・CI・prebuilt 対応を追加する
   - @voluntas
 - [ADD] iOS / Android 向けのビルド・CI・prebuilt 対応を追加する

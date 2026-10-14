@@ -22,6 +22,8 @@ version = "v1.17.0"
 [build-dependencies]
 # libvpx の C ヘッダーから Rust バインディングを生成する
 bindgen = "0.72"
+# Windows (MSVC) の Visual Studio 環境 (msbuild.exe / cl.exe) を検出する
+cc = "1.8"
 # Cargo.toml の package.metadata から外部ライブラリの URL とバージョンを読み取る
 shiguredo_toml = "2026.2"
 
