@@ -699,11 +699,11 @@ fn build_from_source_windows(src_dir: &Path) {
         config.configure_target,
         disable_extra_build_targets().join(" ")
     );
-    run_with_shell(src_dir, &configure, "configure", &config.envs);
-    run_with_shell(src_dir, "make", "make", &config.envs);
+    run_with_shell(src_dir, &configure, "configure", &config);
+    run_with_shell(src_dir, "make", "make", &config);
     // bindgen が読む include/vpx/ のヘッダーは make install が配置するため、
     // MSVC 経路でも make install は必要になる (静的ライブラリはこの配置先を使わない)。
-    run_with_shell(src_dir, "make install", "make install", &config.envs);
+    run_with_shell(src_dir, "make install", "make install", &config);
 
     // MSVC のビルド成果物は <src>/x64/Release/vpxmd.lib に出力され、make install の
     // 配置先は lib/x64/vpxmd.lib になる。どちらもリンク名 (rustc-link-lib=static=vpx) が
@@ -734,6 +734,14 @@ struct MsvcSourceBuildConfig {
     configure_target: String,
     /// configure / make に渡す環境変数 (msbuild.exe を含むディレクトリを PATH に追加する)
     envs: Vec<(String, String)>,
+    /// configure / make に渡す前に取り除く環境変数
+    ///
+    /// libvpx の build/make/Makefile は `.DEFAULT` で `make target=<toolchain>` を
+    /// 再帰呼び出しする。make のコマンドライン変数は子プロセスへ export されるため、
+    /// cargo が build script に渡す `TARGET` をそのまま残すと、MSBuild (Windows 上の
+    /// .NET) が大文字小文字を区別しない環境変数の辞書に `target` と `TARGET` の
+    /// 両方を追加しようとして失敗する (error MSB6001)。
+    remove_envs: Vec<String>,
 }
 
 /// サポート対象の Windows ターゲットであることを確認する
@@ -792,6 +800,8 @@ fn get_msvc_source_build_config() -> MsvcSourceBuildConfig {
     MsvcSourceBuildConfig {
         configure_target: format!("x86_64-win64-vs{vs_version}"),
         envs: vec![("PATH".to_string(), path)],
+        // cargo が渡す TARGET は libvpx の make が export する target と衝突する
+        remove_envs: vec!["TARGET".to_string()],
     }
 }
 
@@ -827,11 +837,16 @@ fn detect_visual_studio_version() -> u32 {
 }
 
 // shell 経由でコマンドを実行する
-fn run_with_shell(src_dir: &Path, command: &str, step_name: &str, envs: &[(String, String)]) {
+//
+// MSVC のソースビルド専用。環境変数の追加と削除は MsvcSourceBuildConfig に従う。
+fn run_with_shell(src_dir: &Path, command: &str, step_name: &str, config: &MsvcSourceBuildConfig) {
     let mut cmd = Command::new("sh");
     cmd.arg("-c").arg(command).current_dir(src_dir);
-    for (key, value) in envs {
+    for (key, value) in &config.envs {
         cmd.env(key, value);
+    }
+    for key in &config.remove_envs {
+        cmd.env_remove(key);
     }
     let success = cmd.status().is_ok_and(|status| status.success());
     if !success {
