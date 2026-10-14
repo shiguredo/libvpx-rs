@@ -689,6 +689,7 @@ fn get_ios_sdk_path(sdk: &str) -> String {
 // シェルを利用する)。
 fn build_from_source_windows(src_dir: &Path) {
     validate_windows_target();
+    disable_msvc_ltcg(src_dir);
 
     let config = get_msvc_source_build_config();
 
@@ -723,6 +724,33 @@ fn build_from_source_windows(src_dir: &Path) {
     fs::create_dir_all(&lib_dir).expect("failed to create lib directory");
     fs::copy(&built_lib, lib_dir.join(static_library_name()))
         .expect("failed to copy MSVC static library");
+}
+
+/// MSVC 向け Visual Studio プロジェクトから /GL (LTCG) を外す
+///
+/// 上流のビルドスクリプトは Release 構成で WholeProgramOptimization を有効にするため、
+/// オブジェクトが /GL でビルドされる。/GL のオブジェクトは llvm-objcopy が解釈できず
+/// シンボル書き換えが失敗するため、プロジェクト生成スクリプトをパッチして無効化する。
+/// 最適化自体は /O2 のまま維持される。
+///
+/// 置換対象が見つからない場合は upstream の変更を検知するため panic する。
+fn disable_msvc_ltcg(src_dir: &Path) {
+    let script_path = src_dir.join("build/make/gen_msvs_vcxproj.sh");
+    let script = fs::read_to_string(&script_path).expect("failed to read libvpx vcxproj generator");
+    let script = replace_once(
+        "build/make/gen_msvs_vcxproj.sh",
+        &script,
+        concat!(
+            "            if [ \"$config\" = \"Release\" ]; then\n",
+            "                tag_content WholeProgramOptimization true\n",
+        ),
+        concat!(
+            "            if [ \"$config\" = \"Release\" ]; then\n",
+            "                # /GL のオブジェクトは llvm-objcopy が解釈できないため無効化する\n",
+            "                tag_content WholeProgramOptimization false\n",
+        ),
+    );
+    fs::write(&script_path, script).expect("failed to write libvpx vcxproj generator");
 }
 
 /// Windows (MSVC) 向けソースビルドの設定を保持する
