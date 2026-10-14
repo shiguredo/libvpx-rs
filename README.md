@@ -51,13 +51,16 @@ Please read <https://github.com/shiguredo/oss> before use.
 - Android arm64-v8a
 - Android x86_64
 
+Windows は MSVC (`x86_64-pc-windows-msvc`) のみをサポートします。
+MinGW (`x86_64-pc-windows-gnu`) は CRT が異なり、MSVC でビルドした他のネイティブライブラリと同一バイナリにリンクできないため非対応です。
+
 ### ソースビルド時の追加要件
 
 - Git
 - C コンパイラ (`build-essential` 等)
 - YASM または NASM (libvpx のアセンブリ最適化に必要)
 - libclang (bindgen が使用する)
-- Windows の場合は MSYS2 + MINGW64 (`gcc` / `make` / `nasm` / `clang`) が必要
+- Windows の場合は Visual Studio 2022 (v17) または 2026 (v18) の C++ ビルドツールと、MSYS2 MINGW64 (`make` / `nasm` / `clang`) が必要
 - iOS の場合は Xcode
 - Android の場合は Android NDK (`ANDROID_NDK_HOME` で指定)
 
@@ -69,8 +72,12 @@ sudo apt-get install -y build-essential nasm
 brew install nasm
 
 # Windows (MSYS2 MINGW64)
-pacman -S git make nasm mingw-w64-x86_64-gcc mingw-w64-x86_64-binutils mingw-w64-x86_64-clang
+pacman -S git make nasm mingw-w64-x86_64-clang
 ```
+
+Windows 向けのソースビルドは MSVC の `msbuild.exe` を使うため Windows ホストが必要です。
+libvpx の configure と GNU make は POSIX シェル上で動くため、MSVC に切り替えても MSYS2 が必要です (MSVC に切り替わるのはコンパイラだけです)。
+configure に渡す `--target` (`x86_64-win64-vs17` / `x86_64-win64-vs18`) は、インストールされた Visual Studio のバージョンに合わせて `build.rs` が自動選択します。
 
 ## ビルド
 
@@ -79,6 +86,11 @@ pacman -S git make nasm mingw-w64-x86_64-gcc mingw-w64-x86_64-binutils mingw-w64
 ```bash
 cargo build
 ```
+
+### Windows 向け prebuilt
+
+Windows 向けの prebuilt は、MSVC でビルドしてシンボル書き換え済みの `lib/vpx.lib` と `bindings.rs` を収録した `libvpx-windows_x86_64.tar.gz` です。
+MSVC でのビルドに対応したバージョン (`2026.2.0` 以降) の GitHub Release から提供します。
 
 ### iOS / Android 向け prebuilt
 

@@ -104,7 +104,7 @@ fn download_prebuilt(out_dir: &Path) -> PathBuf {
     fs::create_dir_all(&prebuilt_dir).expect("failed to create prebuilt directory");
 
     // curl でアーカイブをダウンロード
-    eprintln!("prebuilt ライブラリをダウンロード中: {}", archive_url);
+    eprintln!("downloading prebuilt library: {}", archive_url);
     let status = Command::new("curl")
         .args(["-fsSL", "-o"])
         .arg(&archive_path)
@@ -143,15 +143,21 @@ fn download_prebuilt(out_dir: &Path) -> PathBuf {
 
     // ライブラリファイルを OUT_DIR/lib/ にコピー
     //
-    // prebuilt アーカイブにはリリースビルド時にシンボル書き換え済みの libvpx.a と
+    // prebuilt アーカイブにはリリースビルド時にシンボル書き換え済みの静的ライブラリと
     // #[link_name] 属性付きの bindings.rs が含まれているため、そのままコピーするだけでよい。
+    let lib_file_name = static_library_name();
+    let prebuilt_lib = prebuilt_dir.join("lib").join(lib_file_name);
+    if !prebuilt_lib.exists() {
+        panic!(
+            "prebuilt archive does not contain the expected static library: {}. \
+             It may have been built by an older release workflow",
+            prebuilt_lib.display()
+        );
+    }
     let lib_dir = out_dir.join("lib");
     fs::create_dir_all(&lib_dir).expect("failed to create lib directory");
-    fs::copy(
-        prebuilt_dir.join("lib").join("libvpx.a"),
-        lib_dir.join("libvpx.a"),
-    )
-    .expect("failed to copy libvpx.a");
+    fs::copy(&prebuilt_lib, lib_dir.join(lib_file_name))
+        .expect("failed to copy prebuilt static library");
 
     // bindings.rs を OUT_DIR/ にコピー
     fs::copy(
@@ -675,37 +681,204 @@ fn get_ios_sdk_path(sdk: &str) -> String {
         .to_string()
 }
 
-// Windows + MSYS2 環境でのソースビルド
+// Windows (MSVC) 環境でのソースビルド
+//
+// libvpx の MSVC ターゲットでは configure が Visual Studio のソリューションを生成し、
+// make が msbuild.exe を呼び出してビルドする。configure と GNU make は POSIX シェル上で
+// 動くため、MSVC 経路でも sh / make / nasm が必要になる (MSYS2 や Git for Windows の
+// シェルを利用する)。
 fn build_from_source_windows(src_dir: &Path) {
-    let target_arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
-    let configure_target = match target_arch.as_str() {
-        "x86_64" => "x86_64-win64-gcc",
-        _ => panic!("unsupported Windows arch for source-build: {}", target_arch),
-    };
+    validate_windows_target();
+    disable_msvc_ltcg(src_dir);
 
-    // `configure` はシェルスクリプトなので sh 経由で実行する
-    run_with_shell(
-        src_dir,
-        &format!(
-            "./configure --target={configure_target} \
-             --disable-shared --enable-vp9-highbitdepth --prefix=\"$(pwd)\""
-        ),
-        "configure",
+    let config = get_msvc_source_build_config();
+
+    // 実行ファイル (examples / tools) とテストはビルドしない。
+    // *-vs* ターゲットは unit tests / webm_io / libyuv を既定で soft-enable する
+    let configure = format!(
+        "./configure --target={} --disable-shared --enable-vp9-highbitdepth --prefix=\"$(pwd)\" {}",
+        config.configure_target,
+        disable_extra_build_targets().join(" ")
     );
-    run_with_shell(src_dir, "make", "make");
-    run_with_shell(src_dir, "make install", "make install");
+    run_with_shell(src_dir, &configure, "configure", &config);
+    run_with_shell(src_dir, "make", "make", &config);
+    // bindgen が読む include/vpx/ のヘッダーは make install が配置するため、
+    // MSVC 経路でも make install は必要になる (静的ライブラリはこの配置先を使わない)。
+    run_with_shell(src_dir, "make install", "make install", &config);
+
+    // MSVC のビルド成果物は <src>/x64/Release/vpxmd.lib に出力され、make install の
+    // 配置先は lib/x64/vpxmd.lib になる。どちらもリンク名 (rustc-link-lib=static=vpx) が
+    // 探す vpx.lib とは場所も名前も一致しないため、lib/ 配下にコピーする。
+    // CRT を動的リンクする既定 (--enable-static-msvcrt を指定しない) では vpxmd.lib になる。
+    let built_lib = src_dir.join("x64").join("Release").join("vpxmd.lib");
+    if !built_lib.exists() {
+        // configure が生成する Makefile は msbuild.exe を PATH から探し、見つからないと
+        // ビルドをスキップしたまま成功する。PATH の追加が効いていない場合もここで検出する
+        panic!(
+            "MSVC static library not found at {}. The Visual Studio build failed or was \
+             skipped because msbuild.exe was not found in PATH",
+            built_lib.display()
+        );
+    }
+    let lib_dir = src_dir.join("lib");
+    fs::create_dir_all(&lib_dir).expect("failed to create lib directory");
+    fs::copy(&built_lib, lib_dir.join(static_library_name()))
+        .expect("failed to copy MSVC static library");
+}
+
+/// MSVC 向け Visual Studio プロジェクトから /GL (LTCG) を外す
+///
+/// 上流のビルドスクリプトは Release 構成で WholeProgramOptimization を有効にするため、
+/// オブジェクトが /GL でビルドされる。/GL のオブジェクトは llvm-objcopy が解釈できず
+/// シンボル書き換えが失敗するため、プロジェクト生成スクリプトをパッチして無効化する。
+/// 最適化自体は /O2 のまま維持される。
+///
+/// 置換対象が見つからない場合は upstream の変更を検知するため panic する。
+fn disable_msvc_ltcg(src_dir: &Path) {
+    let script_path = src_dir.join("build/make/gen_msvs_vcxproj.sh");
+    let script = fs::read_to_string(&script_path).expect("failed to read libvpx vcxproj generator");
+    let script = replace_once(
+        "build/make/gen_msvs_vcxproj.sh",
+        &script,
+        concat!(
+            "            if [ \"$config\" = \"Release\" ]; then\n",
+            "                tag_content WholeProgramOptimization true\n",
+        ),
+        concat!(
+            "            if [ \"$config\" = \"Release\" ]; then\n",
+            "                # /GL のオブジェクトは llvm-objcopy が解釈できないため無効化する\n",
+            "                tag_content WholeProgramOptimization false\n",
+        ),
+    );
+    fs::write(&script_path, script).expect("failed to write libvpx vcxproj generator");
+}
+
+/// Windows (MSVC) 向けソースビルドの設定を保持する
+struct MsvcSourceBuildConfig {
+    /// configure に渡す `--target` の値 (例: x86_64-win64-vs17)
+    ///
+    /// configure は Visual Studio のソリューションを生成するため、実行環境に
+    /// インストールされた Visual Studio のバージョンに合わせる必要がある。
+    configure_target: String,
+    /// configure / make に渡す環境変数 (msbuild.exe を含むディレクトリを PATH に追加する)
+    envs: Vec<(String, String)>,
+    /// configure / make に渡す前に取り除く環境変数
+    ///
+    /// libvpx の build/make/Makefile は `.DEFAULT` で `make target=<toolchain>` を
+    /// 再帰呼び出しする。make のコマンドライン変数は子プロセスへ export されるため、
+    /// cargo が build script に渡す `TARGET` をそのまま残すと、MSBuild (Windows 上の
+    /// .NET) が大文字小文字を区別しない環境変数の辞書に `target` と `TARGET` の
+    /// 両方を追加しようとして失敗する (error MSB6001)。
+    remove_envs: Vec<String>,
+}
+
+/// サポート対象の Windows ターゲットであることを確認する
+///
+/// MinGW-w64 (GCC) でビルドした静的ライブラリは MSVC の CRT と互換にならず、
+/// MSVC でビルドした他のネイティブライブラリと同一バイナリにリンクできない。
+/// UWP は WINAPI ファミリが異なるため x86_64-pc-windows-msvc 向けの成果物をそのまま
+/// 使えず、ARM64 はアーキテクチャが異なる。いずれもリンク時の分かりにくいエラーでは
+/// なくここで拒否する。
+fn validate_windows_target() {
+    let rust_target = env::var("TARGET").expect("TARGET is not set");
+    if rust_target == "x86_64-pc-windows-msvc" {
+        return;
+    }
+
+    if env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default() == "gnu" {
+        panic!(
+            "Windows supports only MSVC (x86_64-pc-windows-msvc), but the target is \
+             '{rust_target}'. MinGW (x86_64-pc-windows-gnu) cannot be linked with \
+             MSVC-built libraries"
+        );
+    }
+    panic!("unsupported Windows target: {rust_target}. Use x86_64-pc-windows-msvc (MSVC)");
+}
+
+/// Windows (MSVC) 向けソースビルドの設定を返す
+fn get_msvc_source_build_config() -> MsvcSourceBuildConfig {
+    let vs_version = detect_visual_studio_version();
+
+    // configure が生成する Makefile は PATH 上の msbuild.exe を呼び出すため、
+    // 検出した msbuild.exe のディレクトリを PATH の先頭に追加する。
+    let Some(msbuild) = find_msvc_tool("msbuild.exe") else {
+        panic!(
+            "msbuild.exe not found. Windows source-build requires Visual Studio 2022 (v17) or \
+             2026 (v18) with the C++ build tools"
+        );
+    };
+    let msbuild_dir = msbuild
+        .path()
+        .parent()
+        .expect("msbuild.exe path has no parent directory");
+
+    // C++ ツールセットが無い環境では configure が生成したソリューションのビルドで
+    // 初めて失敗するため、開始前に確認する。
+    if find_msvc_tool("cl.exe").is_none() {
+        panic!("cl.exe not found. Install the MSVC C++ build tools");
+    }
+
+    // MSVC のソースビルドは Windows ホスト専用なので、PATH の区切りは Windows 形式 (;) にする。
+    let path = format!(
+        "{};{}",
+        msbuild_dir.display(),
+        env::var("PATH").unwrap_or_default()
+    );
+
+    MsvcSourceBuildConfig {
+        configure_target: format!("x86_64-win64-vs{vs_version}"),
+        envs: vec![("PATH".to_string(), path)],
+        // cargo が渡す TARGET は libvpx の make が export する target と衝突する
+        remove_envs: vec!["TARGET".to_string()],
+    }
+}
+
+/// cc クレート経由で MSVC のツール (msbuild.exe / cl.exe など) を探す
+///
+/// msbuild.exe は Windows ホスト以外では常に None になる。本クレートの MSVC 経路は
+/// Windows ホストでのビルドを前提とする。
+fn find_msvc_tool(tool: &str) -> Option<cc::Tool> {
+    cc::windows_registry::find_tool("x86_64-pc-windows-msvc", tool)
+}
+
+/// インストールされた Visual Studio のバージョン番号を返す
+///
+/// libvpx v1.17.0 の configure は x86_64 向けに vs14 以降の MSVC ターゲットを用意しているが、
+/// 本クレートがサポートする Visual Studio 2022 (v17) と 2026 (v18) だけを受け付ける。
+fn detect_visual_studio_version() -> u32 {
+    use cc::windows_registry::VsVers;
+
+    match cc::windows_registry::find_vs_version() {
+        Ok(VsVers::Vs17) => 17,
+        Ok(VsVers::Vs18) => 18,
+        Ok(_) => panic!(
+            "unsupported Visual Studio version. Windows source-build requires \
+             Visual Studio 2022 (v17) or 2026 (v18)"
+        ),
+        // cc のエラーは前後に改行を含むため、埋め込む前に取り除く
+        Err(e) => panic!(
+            "failed to detect Visual Studio: {}. Windows source-build requires a Windows host \
+             with Visual Studio 2022 (v17) or 2026 (v18)",
+            e.trim()
+        ),
+    }
 }
 
 // shell 経由でコマンドを実行する
-fn run_with_shell(src_dir: &Path, command: &str, step_name: &str) {
-    let success = Command::new("sh")
-        .arg("-c")
-        .arg(command)
-        .current_dir(src_dir)
-        .status()
-        .is_ok_and(|status| status.success());
+//
+// MSVC のソースビルド専用。環境変数の追加と削除は MsvcSourceBuildConfig に従う。
+fn run_with_shell(src_dir: &Path, command: &str, step_name: &str, config: &MsvcSourceBuildConfig) {
+    let mut cmd = Command::new("sh");
+    cmd.arg("-c").arg(command).current_dir(src_dir);
+    for (key, value) in &config.envs {
+        cmd.env(key, value);
+    }
+    for key in &config.remove_envs {
+        cmd.env_remove(key);
+    }
+    let success = cmd.status().is_ok_and(|status| status.success());
     if !success {
-        panic!("[{}] failed to build {LIB_NAME} on Windows", step_name);
+        panic!("[{step_name}] failed to build {LIB_NAME} on Windows");
     }
 }
 
@@ -826,19 +999,28 @@ fn rewrite_symbols(lib_dir: &Path, out_dir: &Path) -> SymbolLinkNameCallbacks {
     }
 }
 
-/// 静的ライブラリのパスを探す
+/// ビルドディレクトリの lib/ 配下から静的ライブラリのパスを探す
 ///
-/// ビルド結果は Unix 系では libvpx.a、Windows では vpx.lib として出力される。
+/// 見つからない場合は panic する。
 fn find_static_library(lib_dir: &Path) -> PathBuf {
-    let unix_path = lib_dir.join("libvpx.a");
-    if unix_path.exists() {
-        return unix_path;
-    }
-    let win_path = lib_dir.join("vpx.lib");
-    if win_path.exists() {
-        return win_path;
+    let path = lib_dir.join(static_library_name());
+    if path.exists() {
+        return path;
     }
     panic!("static library not found in {}", lib_dir.display());
+}
+
+/// プラットフォームごとの静的ライブラリ名を返す
+///
+/// libvpx は Unix 系では libvpx.a を出力するが、MSVC では CRT を動的リンクする
+/// vpxmd.lib を出力する。MSVC の成果物はリンク名 (rustc-link-lib=static=vpx) に
+/// 合わせて vpx.lib にリネームして配置するため、ここでもその名前を返す。
+fn static_library_name() -> &'static str {
+    if env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default() == "msvc" {
+        "vpx.lib"
+    } else {
+        "libvpx.a"
+    }
 }
 
 /// rustc --print sysroot の結果を取得する
@@ -882,8 +1064,8 @@ fn exe_name(name: &str) -> String {
 ///
 /// llvm-nm / llvm-objcopy はホスト上で実行するツールなので、クロスコンパイル時は
 /// TARGET ではなく HOST のパスから探す必要がある。
-/// 例: Windows CI でホストが x86_64-pc-windows-msvc、ターゲットが x86_64-pc-windows-gnu の場合、
-/// llvm-tools は msvc 側にのみインストールされている。
+/// 例: Linux ホストで Android 向けにクロスコンパイルする場合、
+/// llvm-tools はホスト (Linux) 側にのみインストールされている。
 fn discover_llvm_tools() -> LlvmTools {
     let sysroot = get_rustc_sysroot();
     // llvm-tools はホスト上で動作するため HOST を使う。
@@ -1047,11 +1229,18 @@ fn rewrite_archive_symbols(objcopy_path: &Path, lib_path: &Path, map_file: &Path
 
 // Rust のモバイルターゲット、または OS とアーキテクチャからプラットフォーム名を生成する
 fn get_target_platform() -> String {
+    let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+
+    // LIBVPX_TARGET による明示指定よりも先に検証して、CRT や ABI の食い違いによる
+    // 分かりにくいリンクエラーを避ける。
+    if target_os == "windows" {
+        validate_windows_target();
+    }
+
     if let Ok(target) = env::var("LIBVPX_TARGET") {
         return target;
     }
 
-    let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     let target_arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
     let rust_target = env::var("TARGET").expect("TARGET is not set");
 
